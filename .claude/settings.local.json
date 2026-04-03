@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash([ -f \"/c/Users/marvi/Projects/ChiaLispProject/$f\" ])"
-    ]
-  }
-}
