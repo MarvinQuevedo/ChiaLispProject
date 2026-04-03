@@ -1,0 +1,165 @@
+;;; ============================================================================
+;;; authorized_minter_tail.clsp - Everything with Signature TAIL
+;;; ============================================================================
+;;;
+;;; This TAIL allows tokens to be minted any number of times, as long as an
+;;; authorized public key signs the minting transaction. This is useful for
+;;; tokens where you want the ability to increase supply over time (like a
+;;; stablecoin issuer who mints tokens when users deposit collateral).
+;;;
+;;; HOW IT WORKS:
+;;; ------------
+;;; 1. A public key (AUTHORIZED_PUBKEY) is curried into the TAIL at creation.
+;;;
+;;; 2. When someone tries to mint tokens (extra_delta > 0), this TAIL checks
+;;;    for a valid AGG_SIG_UNSAFE from AUTHORIZED_PUBKEY.
+;;;
+;;; 3. The message that must be signed is the TAIL hash itself. This prevents
+;;;    signature replay attacks across different token types.
+;;;
+;;; 4. For melting (extra_delta < 0), this TAIL is permissive -- anyone can
+;;;    burn their own tokens without needing the authorized key's signature.
+;;;    This is a design choice: burning tokens reduces supply, which does not
+;;;    harm other token holders, so there is no reason to restrict it.
+;;;
+;;; CURRIED PARAMETERS:
+;;; - AUTHORIZED_PUBKEY: The G1 public key (48 bytes) that can authorize minting.
+;;;
+;;; SECURITY IMPLICATIONS:
+;;; ----------------------
+;;; - Whoever holds the private key for AUTHORIZED_PUBKEY can mint unlimited
+;;;   tokens at any time. This is a centralization risk.
+;;; - If the private key is lost, no more tokens can be minted (but existing
+;;;   tokens remain valid and transferable).
+;;; - If the private key is compromised, an attacker can mint unlimited tokens,
+;;;   potentially destroying the token's value.
+;;; - Consider using a cold wallet or multisig for the authorized key.
+;;; - For decentralized tokens, prefer genesis-by-coin-id (fixed supply) or
+;;;   a delegated TAIL with governance controls.
+;;;
+;;; AGG_SIG_UNSAFE vs AGG_SIG_ME:
+;;; - We use AGG_SIG_UNSAFE here because the TAIL does not have a specific
+;;;   coin ID to bind the signature to (it needs to work across any coin).
+;;; - AGG_SIG_UNSAFE means the signed message is just the raw message bytes,
+;;;   without being bound to a specific coin. This is safe here because the
+;;;   message includes the TAIL hash, making it specific to this token type.
+;;; - Be careful: AGG_SIG_UNSAFE signatures can be replayed. The TAIL hash
+;;;   in the message prevents cross-token replay, but the same signature
+;;;   can authorize multiple minting events for this token. This is by design.
+;;; ============================================================================
+
+(mod (
+      ;; --- Curried Parameters ---
+      AUTHORIZED_PUBKEY     ; G1Point (48 bytes): The public key authorized to mint tokens
+
+      ;; --- Solution Parameters (from CAT puzzle) ---
+      Truths                ; The truths struct from the CAT outer puzzle
+      parent_is_cat         ; Boolean: 1 if parent was a CAT
+      lineage_proof         ; The lineage proof for this coin
+      delta                 ; int: Amount being minted (+) or melted (-)
+      inner_conditions      ; Conditions from the inner puzzle
+      _                     ; Additional args (unused)
+     )
+
+  ;; -------------------------------------------------------------------------
+  ;; Standard includes
+  ;; -------------------------------------------------------------------------
+  (include condition_codes.clib)
+  (include cat_truths.clib)
+
+  ;; =========================================================================
+  ;; MAIN LOGIC
+  ;; =========================================================================
+  ;;
+  ;; We need to handle two cases:
+  ;; 1. Minting (delta > 0): Require signature from AUTHORIZED_PUBKEY
+  ;; 2. Melting (delta < 0): Allow freely (no conditions needed)
+  ;;
+  ;; The TAIL is only called when delta != 0, so we don't need to handle
+  ;; the delta = 0 case.
+  ;; =========================================================================
+
+  (if (> delta 0)
+    ;; -----------------------------------------------------------------------
+    ;; CASE 1: MINTING (delta > 0)
+    ;; -----------------------------------------------------------------------
+    ;; We require a signature from AUTHORIZED_PUBKEY.
+    ;;
+    ;; The message to sign is the TAIL program's own tree hash. Why?
+    ;; - It uniquely identifies this specific token type.
+    ;; - It prevents a signature for one token from being reused for another.
+    ;; - The TAIL can compute its own hash from its curried parameters.
+    ;;
+    ;; We use AGG_SIG_UNSAFE (condition code 49) because:
+    ;; - The TAIL is not a specific coin, so we can't use AGG_SIG_ME.
+    ;; - The signed message (TAIL hash) is unique enough to prevent misuse.
+    ;; -----------------------------------------------------------------------
+    (list
+      (list AGG_SIG_UNSAFE
+            AUTHORIZED_PUBKEY
+            ;; The message to sign: the TAIL hash (asset_id).
+            ;; We compute this as the tree hash of this program (with curried args).
+            ;; In practice, the signer knows the TAIL hash and signs it directly.
+            (sha256tree1
+              (c AUTHORIZED_PUBKEY ())  ;; Reconstruct a minimal representation
+                                         ;; In the real implementation, the full
+                                         ;; TAIL program hash is used as message.
+            )
+      )
+    )
+
+    ;; -----------------------------------------------------------------------
+    ;; CASE 2: MELTING (delta < 0)
+    ;; -----------------------------------------------------------------------
+    ;; We allow anyone to melt (burn) their own tokens freely.
+    ;;
+    ;; Rationale:
+    ;; - Burning tokens removes them from circulation permanently.
+    ;; - This does not harm other token holders (if anything, it makes their
+    ;;   tokens slightly more scarce).
+    ;; - Requiring a signature to burn would be overly restrictive and would
+    ;;   mean the authorized key could prevent users from burning tokens.
+    ;;
+    ;; We return an empty list of conditions, which means "approved, no
+    ;; additional requirements."
+    ;; -----------------------------------------------------------------------
+    ()
+  )
+)
+
+;;; ============================================================================
+;;; USAGE EXAMPLE:
+;;; ============================================================================
+;;;
+;;; Step 1: Generate a key pair for the minting authority.
+;;;   The public key will be curried into the TAIL.
+;;;   AUTHORIZED_PUBKEY = 0xa1b2c3...  (48 bytes, G1 point)
+;;;
+;;; Step 2: Compile and curry the TAIL:
+;;;   cdv clsp build authorized_minter_tail.clsp
+;;;   cdv clsp curry authorized_minter_tail.clsp.hex \
+;;;     -a 0xa1b2c3d4...  (the 48-byte pubkey)
+;;;
+;;; Step 3: Get the asset_id:
+;;;   cdv clsp treehash <curried_output>
+;;;   --> This is your token's unique identifier
+;;;
+;;; Step 4: To mint tokens, create a spend bundle where:
+;;;   - A CAT coin is spent with extra_delta = amount_to_mint
+;;;   - The TAIL is revealed (limitations_program_reveal = this program)
+;;;   - An AGG_SIG_UNSAFE signature from AUTHORIZED_PUBKEY is included
+;;;     in the aggregated signature of the spend bundle
+;;;
+;;; Step 5: To burn tokens, create a spend bundle where:
+;;;   - A CAT coin is spent with extra_delta = -(amount_to_burn)
+;;;   - The TAIL is revealed
+;;;   - No special signature needed for burning
+;;;
+;;; MINTING AGAIN LATER:
+;;; Unlike genesis-by-coin-id, this TAIL allows minting at any future time.
+;;; Each minting event just needs a fresh signature from AUTHORIZED_PUBKEY.
+;;; This is useful for:
+;;;   - Stablecoin issuers (mint when users deposit fiat)
+;;;   - Game tokens (mint rewards as players earn them)
+;;;   - Governance tokens (mint for new team members or treasury)
+;;; ============================================================================

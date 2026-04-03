@@ -1,0 +1,82 @@
+;;; ============================================================
+;;; anyone_can_spend.clsp
+;;; ============================================================
+;;;
+;;; THE SIMPLEST POSSIBLE PUZZLE
+;;;
+;;; This puzzle allows ANYONE to spend the coin. There is no
+;;; password, no signature, no restriction of any kind. The
+;;; spender provides the conditions they want, and the puzzle
+;;; returns them as-is.
+;;;
+;;; === HOW IT WORKS ===
+;;;
+;;; The solution is a list of conditions. The puzzle simply
+;;; returns that list. Since there is no authentication,
+;;; literally anyone can spend this coin and direct the funds
+;;; wherever they want.
+;;;
+;;; === WHY IS THIS INSECURE? ===
+;;;
+;;; 1. No signature required -- anyone can spend it.
+;;; 2. No restrictions on conditions -- the spender decides
+;;;    where the funds go.
+;;; 3. The moment this coin appears on chain, a bot can
+;;;    immediately spend it and take the funds.
+;;;
+;;; === WHEN WOULD YOU USE THIS? ===
+;;;
+;;; - Testing and learning (never on mainnet with real value!)
+;;; - As a building block to understand more complex puzzles.
+;;; - Sometimes used in protocol designs where the "anyone can
+;;;   spend" behavior is intentional and other mechanisms
+;;;   provide security (e.g., wrapped by an outer puzzle).
+;;;
+;;; === EXAMPLE SPEND ===
+;;;
+;;; Puzzle: (mod (conditions) conditions)
+;;; Solution: ((51 0xTARGET_PUZZLE_HASH 1000))
+;;;
+;;; Output conditions: ((51 0xTARGET_PUZZLE_HASH 1000))
+;;; --> Creates a new coin with 1000 mojos at TARGET address.
+;;;
+;;; === COMPILATION ===
+;;;
+;;; $ run anyone_can_spend.clsp
+;;; Result: 1   (just returns the first argument)
+;;;
+;;; $ brun 1 '((51 0xabcd 1000))'
+;;; Result: ((51 0xabcd 1000))
+;;;
+;;; ============================================================
+
+(mod (conditions)
+
+  ;; The puzzle simply returns whatever conditions the spender
+  ;; provides. No checks, no authentication, no restrictions.
+  ;;
+  ;; This is the ChiaLisp equivalent of an unlocked door.
+
+  conditions
+)
+
+;;; ============================================================
+;;; SECURITY ANALYSIS
+;;; ============================================================
+;;;
+;;; Threat: ANYONE can spend this coin.
+;;;   Severity: CRITICAL
+;;;   Because: No authentication mechanism at all.
+;;;
+;;; Threat: Funds can be directed anywhere.
+;;;   Severity: CRITICAL
+;;;   Because: The spender chooses the CREATE_COIN conditions.
+;;;
+;;; Threat: Front-running / MEV.
+;;;   Severity: CRITICAL
+;;;   Because: A mempool observer can see the spend and submit
+;;;   a competing spend with higher fees that redirects funds
+;;;   to themselves.
+;;;
+;;; NEVER use this puzzle to hold real value.
+;;; ============================================================

@@ -1,0 +1,87 @@
+; ============================================
+; factorial.clsp — Factorial with Tail-Call Optimization
+; ============================================
+;
+; Compute N! (N factorial) = N × (N-1) × (N-2) × ... × 1
+;
+; COMPILE:  run factorial.clsp
+; RUN:      brun "$(run factorial.clsp)" "(5)"
+; OUTPUT:   120
+;
+; RUN:      brun "$(run factorial.clsp)" "(10)"
+; OUTPUT:   3628800
+
+(mod (N)
+
+  ; ---- NAIVE FACTORIAL ----
+  ; Simple recursive version — each call waits for the next.
+  ; This builds up a chain: 5 * (4 * (3 * (2 * (1 * 1))))
+  ;
+  ; (defun factorial-naive (n)
+  ;   (if (= n 0)
+  ;     1
+  ;     (* n (factorial-naive (- n 1)))
+  ;   )
+  ; )
+
+  ; ---- TAIL-RECURSIVE FACTORIAL ----
+  ; Uses an accumulator to carry the running product.
+  ; No chain of waiting multiplications — much more memory efficient.
+  ;
+  ; Equivalent Python:
+  ;   result = 1
+  ;   while n > 0:
+  ;       result = result * n
+  ;       n = n - 1
+  ;   return result
+  ;
+  (defun factorial-iter (n acc)
+    (if (= n 0)
+      acc                           ; done — return accumulated result
+      (factorial-iter
+        (- n 1)                     ; decrement n
+        (* acc n)                   ; accumulate: acc = acc * n
+      )
+    )
+  )
+
+  ; --- INPUT VALIDATION ---
+  ; Factorial is undefined for negative numbers.
+  ; Use 'x' (raise) to throw an error if input is negative.
+  (if (> 0 N)
+    (x "factorial is undefined for negative numbers")
+    (factorial-iter N 1)            ; start with accumulator = 1
+  )
+)
+
+; ============================================
+; TRACE for N=5:
+;
+; factorial-iter(5, 1)
+;   → factorial-iter(4, 5)       acc = 1 * 5 = 5
+;   → factorial-iter(3, 20)      acc = 5 * 4 = 20
+;   → factorial-iter(2, 60)      acc = 20 * 3 = 60
+;   → factorial-iter(1, 120)     acc = 60 * 2 = 120
+;   → factorial-iter(0, 120)     acc = 120 * 1 = 120
+;   → 120                        n=0, return acc ✓
+;
+; TAIL-CALL OPTIMIZATION:
+; Notice that the recursive call is the LAST thing the function does.
+; This means CLVM doesn't need to keep the previous stack frames.
+; The function essentially becomes a loop, using constant memory.
+;
+; Without TCO (naive version):
+;   factorial(5)
+;     = 5 * factorial(4)           ← must wait
+;       = 5 * 4 * factorial(3)     ← must wait
+;         = 5 * 4 * 3 * factorial(2) ← must wait
+;           ... (stack grows with N)
+;
+; With TCO (accumulator version):
+;   factorial-iter(5, 1) → factorial-iter(4, 5) → ... → 120
+;   Each call replaces the previous — constant memory!
+;
+; RULE OF THUMB: If your recursive function does ANYTHING after the
+; recursive call (like multiplying), it's NOT tail-recursive.
+; Move that operation into an accumulator argument.
+; ============================================

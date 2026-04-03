@@ -1,0 +1,222 @@
+;;; delegated_puzzle.clsp
+;;;
+;;; A simplified delegated spending puzzle. This demonstrates the core
+;;; idea behind Chia's standard transaction: the owner does not commit
+;;; to specific spending logic at coin creation time. Instead, at spend
+;;; time, the owner provides an arbitrary puzzle (the "delegated puzzle")
+;;; along with its solution, and signs the delegated puzzle's hash to
+;;; prove authorization.
+;;;
+;;; This is a teaching version of p2_delegated_puzzle_or_hidden_puzzle.
+;;; The real standard transaction adds:
+;;; - Hidden puzzle support (taproot-style commitment)
+;;; - Synthetic key derivation
+;;; - Optimized CLVM bytecode
+;;; But the core concept is exactly what you see here.
+;;;
+;;; CURRIED PARAMETERS:
+;;;   OWNER_PUBKEY       - The BLS public key (G1 point, 48 bytes) of
+;;;                        the coin owner. Only the holder of the
+;;;                        corresponding private key can spend this coin.
+;;;
+;;; SOLUTION PARAMETERS:
+;;;   delegated_puzzle   - Any arbitrary CLVM puzzle the owner wants to
+;;;                        run. This is the actual spending logic,
+;;;                        provided at spend time.
+;;;   delegated_solution - The solution for the delegated puzzle.
+;;;
+;;; =====================================================================
+;;; WHY DELEGATED SPENDING IS POWERFUL:
+;;; =====================================================================
+;;;
+;;; The traditional approach: lock a coin with specific spending rules.
+;;;   e.g., "This coin can only be sent to address X or Y."
+;;;   Problem: inflexible. What if you want to send to Z later?
+;;;
+;;; The delegated approach: lock a coin with "owner decides at spend time."
+;;;   The owner provides ANY puzzle they want when they spend.
+;;;   They sign the puzzle hash to prove they authorized it.
+;;;   Result: infinite flexibility with full security.
+;;;
+;;; Example delegated puzzles the owner might provide at spend time:
+;;;
+;;;   1. Simple transfer:
+;;;      (q . ((51 RECIPIENT_HASH 1000)))
+;;;      "Just return this constant list of conditions: send 1000 mojos."
+;;;      (The "q" operator quotes the value, returning it as-is.)
+;;;
+;;;   2. Split payment:
+;;;      (q . ((51 HASH_A 500) (51 HASH_B 500)))
+;;;      "Send 500 to A and 500 to B."
+;;;
+;;;   3. Conditional logic:
+;;;      (mod (data) (if (> data 100) ((51 HASH_A 1000)) ((51 HASH_B 500))))
+;;;      "If data > 100, send to A; otherwise send to B."
+;;;      The delegated_solution provides the data argument.
+;;;
+;;;   4. Complex computation:
+;;;      Any valid CLVM program. The sky is the limit.
+;;;
+;;; The delegated puzzle pattern means ONE puzzle template can handle
+;;; ANY spending scenario. The owner decides at the last possible moment.
+;;;
+;;; =====================================================================
+;;; SECURITY MODEL:
+;;; =====================================================================
+;;;
+;;; The security of this puzzle rests on two pillars:
+;;;
+;;; 1. SIGNATURE VERIFICATION (AGG_SIG_ME):
+;;;    The owner must sign the sha256tree hash of the delegated puzzle.
+;;;    Without the corresponding private key, nobody can produce a valid
+;;;    BLS signature. AGG_SIG_ME additionally binds the signature to
+;;;    this specific coin (via coin_id), preventing cross-coin replay.
+;;;
+;;; 2. HASH COMMITMENT:
+;;;    The signature is over the HASH of the delegated puzzle, not the
+;;;    conditions directly. This means the owner commits to the exact
+;;;    puzzle code. Since the puzzle deterministically produces conditions
+;;;    from its solution, the owner implicitly authorizes all possible
+;;;    outputs of that puzzle.
+;;;
+;;; Attack analysis:
+;;;
+;;; - Attacker provides different delegated_puzzle:
+;;;   BLOCKED. The signature was computed over the hash of the original
+;;;   delegated puzzle. A different puzzle has a different hash, so the
+;;;   signature verification fails.
+;;;
+;;; - Attacker replays the signature on a different coin:
+;;;   BLOCKED. AGG_SIG_ME includes the coin_id in the signed message.
+;;;   A different coin has a different coin_id, so the signature is
+;;;   invalid for that coin.
+;;;
+;;; - Attacker modifies the delegated_solution:
+;;;   DEPENDS. The solution is NOT directly signed. However, the
+;;;   delegated PUZZLE is signed, and it determines how the solution
+;;;   is processed. Best practice: use a quoted puzzle (q . conditions)
+;;;   that ignores the solution entirely, making this attack harmless.
+;;;
+;;; =====================================================================
+;;; EXECUTION FLOW:
+;;; =====================================================================
+;;;
+;;; 1. Owner decides what they want to do (e.g., send mojos somewhere)
+;;; 2. Owner writes a delegated puzzle producing the desired conditions
+;;; 3. Owner computes dpuz_hash = sha256tree(delegated_puzzle)
+;;; 4. Owner signs dpuz_hash with their BLS private key
+;;; 5. Owner submits: solution = (delegated_puzzle delegated_solution)
+;;; 6. This puzzle executes:
+;;;    a. Computes sha256tree(delegated_puzzle)
+;;;    b. Creates AGG_SIG_ME condition: (50 OWNER_PUBKEY dpuz_hash)
+;;;    c. Runs: delegated_conditions = (a delegated_puzzle delegated_solution)
+;;;    d. Returns: (AGG_SIG_ME_condition ...delegated_conditions...)
+;;; 7. Blockchain verifies the BLS aggregate signature
+;;; 8. Blockchain processes all conditions (CREATE_COIN, etc.)
+;;;
+;;; =====================================================================
+;;; COMPARISON WITH THE REAL STANDARD TRANSACTION:
+;;; =====================================================================
+;;;
+;;; This puzzle:
+;;;   (mod (OWNER_PUBKEY dpuz dsol)
+;;;     (c (list 50 OWNER_PUBKEY (sha256tree dpuz))
+;;;        (a dpuz dsol)))
+;;;
+;;; Real standard transaction (simplified):
+;;;   (mod (SYNTHETIC_KEY dpuz dsol)
+;;;     (c (list 50 SYNTHETIC_KEY (sha256tree dpuz))
+;;;        (a dpuz dsol)))
+;;;
+;;; The main difference: SYNTHETIC_KEY vs OWNER_PUBKEY.
+;;; The synthetic key enables the hidden puzzle path (taproot-style),
+;;; but the delegated path works identically to what we have here.
+;;;
+
+; Condition codes
+(defconstant AGG_SIG_ME 50)
+
+(mod (OWNER_PUBKEY delegated_puzzle delegated_solution)
+
+    ;; ================================================================
+    ;; sha256tree -- Compute the treehash of a CLVM value.
+    ;;
+    ;; We need this to hash the delegated puzzle for the signature.
+    ;; The owner signs this hash to prove they authorized running
+    ;; this specific delegated puzzle.
+    ;;
+    ;; Algorithm:
+    ;;   - Pair (cons cell): sha256(0x02 + hash(left) + hash(right))
+    ;;   - Atom (leaf):      sha256(0x01 + atom_bytes)
+    ;;
+    ;; The (l value) test returns true for pairs, false for atoms.
+    ;; ================================================================
+
+    (defun sha256tree (value)
+        (if (l value)
+            (sha256 0x02
+                (sha256tree (f value))
+                (sha256tree (r value))
+            )
+            (sha256 0x01 value)
+        )
+    )
+
+    ;; ================================================================
+    ;; MAIN LOGIC
+    ;; ================================================================
+
+    ; Step 1: Compute the treehash of the delegated puzzle.
+    ;
+    ; This 32-byte hash uniquely identifies the delegated puzzle.
+    ; The owner's signature covers this hash, creating a binding
+    ; commitment: "I authorize running exactly this puzzle."
+    ;
+    ; Even a one-byte change in the delegated puzzle would produce
+    ; a completely different hash, invalidating the signature.
+
+    (assign
+        dpuz_hash (sha256tree delegated_puzzle)
+
+        ; Step 2: Run the delegated puzzle with its solution.
+        ;
+        ; The (a program arguments) operator applies the program to
+        ; the arguments. Here we run the delegated puzzle (provided
+        ; by the spender) with the delegated solution (also provided
+        ; by the spender).
+        ;
+        ; The result is a list of conditions -- the actual spending
+        ; instructions. For example:
+        ;
+        ;   delegated_puzzle = (q . ((51 0xrecipient 1000)))
+        ;   delegated_solution = ()
+        ;   => delegated_conditions = ((51 0xrecipient 1000))
+        ;
+        ; The "q" (quote) operator just returns its argument as-is,
+        ; ignoring the solution. This is the simplest delegated puzzle.
+
+        delegated_conditions (a delegated_puzzle delegated_solution)
+
+        ; Step 3: Combine signature requirement + delegated conditions.
+        ;
+        ; We use (c item list) to prepend the AGG_SIG_ME condition
+        ; to the front of the delegated conditions list.
+        ;
+        ; The final output looks like:
+        ;
+        ;   ((50 OWNER_PUBKEY dpuz_hash)   ; must sign with owner's key
+        ;    (51 0xrecipient 1000)           ; from delegated puzzle
+        ;    ...)                             ; any other conditions
+        ;
+        ; The blockchain will:
+        ;   1. Check that a valid BLS signature exists for
+        ;      OWNER_PUBKEY over the message (dpuz_hash + coin_id)
+        ;   2. Process all remaining conditions (create coins, etc.)
+        ;   3. If anything fails, the entire spend is rejected
+
+        (c
+            (list AGG_SIG_ME OWNER_PUBKEY dpuz_hash)
+            delegated_conditions
+        )
+    )
+)

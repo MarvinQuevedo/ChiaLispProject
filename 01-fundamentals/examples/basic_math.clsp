@@ -1,0 +1,42 @@
+; ============================================
+; basic_math.clsp — Arithmetic Operations
+; ============================================
+;
+; This program demonstrates all arithmetic operations in ChiaLisp.
+; It takes two numbers and returns a list of results.
+;
+; COMPILE:  run basic_math.clsp
+; RUN:      brun "$(run basic_math.clsp)" "(10 3)"
+; OUTPUT:   (13 7 30 3 (3 . 1))
+;           [sum, difference, product, quotient, (quotient . remainder)]
+
+(mod (a b)
+
+  ; Define helper functions using defun
+  (defun show-math (x y)
+    (list
+      (+ x y)        ; Addition:       10 + 3 = 13
+      (- x y)        ; Subtraction:    10 - 3 = 7
+      (* x y)        ; Multiplication: 10 * 3 = 30
+      (/ x y)        ; Division:       10 / 3 = 3 (integer division)
+      (divmod x y)   ; Divmod:         10 divmod 3 = (3 . 1) — quotient and remainder
+    )
+  )
+
+  ; Call our function with the input arguments
+  (show-math a b)
+)
+
+; ============================================
+; NOTES ON ARITHMETIC:
+;
+; - All numbers are arbitrary-precision integers (no floats!)
+; - Division is integer division (rounds toward negative infinity)
+; - Use divmod when you need the remainder
+; - Negative numbers work: brun "$(run basic_math.clsp)" "(-5 3)"
+;
+; TRY THESE:
+;   brun "$(run basic_math.clsp)" "(100 7)"
+;   brun "$(run basic_math.clsp)" "(0 5)"
+;   brun "$(run basic_math.clsp)" "(-10 3)"
+; ============================================

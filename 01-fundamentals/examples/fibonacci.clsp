@@ -1,0 +1,71 @@
+; ============================================
+; fibonacci.clsp — Recursive Fibonacci
+; ============================================
+;
+; Compute the Nth Fibonacci number.
+; F(0) = 0, F(1) = 1, F(n) = F(n-1) + F(n-2)
+;
+; COMPILE:  run fibonacci.clsp
+; RUN:      brun "$(run fibonacci.clsp)" "(10)"
+; OUTPUT:   55
+
+(mod (N)
+
+  ; ---- NAIVE FIBONACCI ----
+  ; Simple but exponential time complexity — O(2^n)
+  ; Good for understanding, bad for performance.
+  ;
+  ; (defun fib-naive (n)
+  ;   (if (> 2 n)       ; if n < 2
+  ;     n               ; return n (base cases: 0→0, 1→1)
+  ;     (+ (fib-naive (- n 1))
+  ;        (fib-naive (- n 2)))
+  ;   )
+  ; )
+
+  ; ---- EFFICIENT FIBONACCI ----
+  ; Uses an accumulator to achieve O(n) time complexity.
+  ; 'a' and 'b' carry the state forward, like variables in a loop.
+  ;
+  ; This is equivalent to:
+  ;   a, b = 0, 1
+  ;   for i in range(n):
+  ;       a, b = b, a + b
+  ;   return a
+  ;
+  (defun fib-iter (n a b)
+    (if (= n 0)
+      a                             ; done — return result
+      (fib-iter
+        (- n 1)                     ; decrement counter
+        b                           ; new a = old b
+        (+ a b)                     ; new b = old a + old b
+      )
+    )
+  )
+
+  ; Start with a=0, b=1
+  (fib-iter N 0 1)
+)
+
+; ============================================
+; HOW THE ACCUMULATOR WORKS:
+;
+; fib-iter(5, 0, 1)
+;   → fib-iter(4, 1, 1)     n=5: a=0, b=1  → new a=1, new b=0+1=1
+;   → fib-iter(3, 1, 2)     n=4: a=1, b=1  → new a=1, new b=1+1=2
+;   → fib-iter(2, 2, 3)     n=3: a=1, b=2  → new a=2, new b=1+2=3
+;   → fib-iter(1, 3, 5)     n=2: a=2, b=3  → new a=3, new b=2+3=5
+;   → fib-iter(0, 5, 8)     n=1: a=3, b=5  → new a=5, new b=3+5=8
+;   → 5                     n=0: return a=5  ✓ (F(5) = 5)
+;
+; TRY IT:
+;   brun "$(run fibonacci.clsp)" "(0)"    → 0
+;   brun "$(run fibonacci.clsp)" "(1)"    → 1
+;   brun "$(run fibonacci.clsp)" "(10)"   → 55
+;   brun "$(run fibonacci.clsp)" "(20)"   → 6765
+;
+; LESSON: The accumulator pattern converts recursion into iteration,
+; making it much more efficient. This is a fundamental technique
+; in functional programming.
+; ============================================

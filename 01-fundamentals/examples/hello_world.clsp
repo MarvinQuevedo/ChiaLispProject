@@ -1,0 +1,38 @@
+; ============================================
+; hello_world.clsp — Your First ChiaLisp Program
+; ============================================
+;
+; This program takes a name as input and returns a greeting.
+;
+; COMPILE:  run hello_world.clsp
+; RUN:      brun "$(run hello_world.clsp)" "(\"World\")"
+; OUTPUT:   "Hello, World!"
+
+(mod (name)
+  ; 'mod' defines the program and names its arguments.
+  ; 'name' will be whatever the solver passes as the first argument.
+
+  ; 'concat' joins bytes together.
+  ; (q . "...") is a quoted string — returned as-is, not evaluated.
+  (concat
+    (q . "Hello, ")   ; Literal string "Hello, "
+    name              ; The argument passed by the solver
+    (q . "!")         ; Literal string "!"
+  )
+)
+
+; ============================================
+; HOW IT WORKS:
+;
+; 1. 'run' compiles this to CLVM bytecode
+; 2. 'brun' executes the bytecode with solution ("World")
+; 3. 'name' gets bound to "World" (path 2 in the solution tree)
+; 4. concat joins: "Hello, " + "World" + "!" = "Hello, World!"
+;
+; TRY IT:
+;   brun "$(run hello_world.clsp)" "(\"Alice\")"
+;   → "Hello, Alice!"
+;
+;   brun "$(run hello_world.clsp)" "(\"ChiaLisp\")"
+;   → "Hello, ChiaLisp!"
+; ============================================

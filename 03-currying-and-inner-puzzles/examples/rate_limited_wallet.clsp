@@ -1,0 +1,250 @@
+;;; rate_limited_wallet.clsp
+;;;
+;;; An outer puzzle that wraps any inner puzzle and enforces a maximum
+;;; spending limit per transaction. The inner puzzle handles ownership
+;;; (e.g., signature verification), while this outer puzzle adds a
+;;; restriction: the total amount in CREATE_COIN conditions must not
+;;; exceed MAX_AMOUNT.
+;;;
+;;; This is a classic example of the inner puzzle composition pattern.
+;;; The outer puzzle does not know or care what the inner puzzle is --
+;;; it could be a standard transaction, a multisig, or anything else.
+;;; It simply runs the inner puzzle and then validates the output.
+;;;
+;;; CURRIED PARAMETERS:
+;;;   MAX_AMOUNT    - The maximum total mojos that can be sent in a
+;;;                   single spend. All CREATE_COIN amounts are summed
+;;;                   and compared against this limit.
+;;;   INNER_PUZZLE  - The inner puzzle that handles ownership/auth.
+;;;                   This is typically a standard transaction puzzle
+;;;                   curried with the owner's public key.
+;;;
+;;; SOLUTION PARAMETERS:
+;;;   inner_solution - The solution for the inner puzzle. The format
+;;;                    depends on what the inner puzzle expects.
+;;;                    For a standard transaction, this would be
+;;;                    (delegated_puzzle delegated_solution).
+;;;
+;;; =====================================================================
+;;; SECURITY MODEL:
+;;; =====================================================================
+;;;
+;;; This puzzle provides "defense in depth." Even if the inner puzzle
+;;; is a standard transaction (which can do anything the owner wants),
+;;; the outer puzzle limits the damage. For example:
+;;;
+;;; - If your private key is compromised, the attacker can only steal
+;;;   MAX_AMOUNT mojos per transaction, not the full coin value.
+;;; - The remaining mojos must go to change, still protected by whatever
+;;;   puzzle the inner conditions specify.
+;;;
+;;; IMPORTANT: This is a simplified educational example. A production
+;;; rate-limited wallet would also need to:
+;;; - Ensure change goes back to a rate-limited puzzle (otherwise the
+;;;   attacker could send change to an unrestricted puzzle)
+;;; - Handle the coin's own amount via ASSERT_MY_AMOUNT
+;;; - Consider edge cases around fees (fees also reduce the coin value)
+;;; - Possibly use ASSERT_MY_COIN_ID for additional safety
+;;;
+;;; =====================================================================
+;;; EXECUTION FLOW:
+;;; =====================================================================
+;;;
+;;; 1. Spender provides inner_solution
+;;; 2. Outer puzzle runs INNER_PUZZLE with inner_solution
+;;; 3. Inner puzzle returns a list of conditions, e.g.:
+;;;    ((51 0xabc... 500) (51 0xdef... 300) (50 0xkey... msg))
+;;; 4. Outer puzzle scans the condition list using recursion
+;;; 5. For every condition with opcode 51 (CREATE_COIN), it extracts
+;;;    the amount (third element) and adds it to a running total
+;;; 6. If total > MAX_AMOUNT, the puzzle raises an error (spend fails)
+;;; 7. If total <= MAX_AMOUNT, the inner conditions are returned as-is
+;;;
+;;; =====================================================================
+;;; EXAMPLE WALKTHROUGH:
+;;; =====================================================================
+;;;
+;;; Say MAX_AMOUNT = 1000 and inner puzzle returns:
+;;;   ((51 0xaaa 400) (50 0xkey msg) (51 0xbbb 500) (51 0xccc 200))
+;;;
+;;; Scanning:
+;;;   Condition (51 0xaaa 400) => opcode 51 => amount = 400, sum = 400
+;;;   Condition (50 0xkey msg) => opcode 50 => skip, sum stays 400
+;;;   Condition (51 0xbbb 500) => opcode 51 => amount = 500, sum = 900
+;;;   Condition (51 0xccc 200) => opcode 51 => amount = 200, sum = 1100
+;;;   Base case: done, total = 1100
+;;;
+;;;   1100 > 1000? YES => FAIL! Spend is rejected.
+;;;
+;;; If the spender changes the amounts to stay under 1000:
+;;;   ((51 0xaaa 400) (50 0xkey msg) (51 0xbbb 500))
+;;;   Total = 900, 900 <= 1000 => SUCCESS, conditions are returned.
+;;;
+;;; =====================================================================
+;;; HOW TO USE:
+;;; =====================================================================
+;;;
+;;; 1. Compile: run rate_limited_wallet.clsp
+;;; 2. Curry:   cdv clsp curry rate_limited_wallet.clsp \
+;;;               -a 1000000 \          ; MAX_AMOUNT = 1,000,000 mojos
+;;;               -a 0x<inner_hex>      ; The compiled inner puzzle
+;;; 3. Spend with a solution: (<inner_solution>)
+;;;
+
+; Condition code for CREATE_COIN
+; Format: (51 puzzle_hash amount ...optional_memos)
+; This is the condition we need to monitor for the spending limit.
+(defconstant CREATE_COIN 51)
+
+(mod (MAX_AMOUNT INNER_PUZZLE inner_solution)
+
+    ;; ================================================================
+    ;; sum_create_coins -- Recursively scan a condition list and compute
+    ;; the total amount of mojos being created via CREATE_COIN (51).
+    ;;
+    ;; Arguments:
+    ;;   conditions - A list of conditions, where each condition is a
+    ;;                list like (opcode arg1 arg2 ...).
+    ;;
+    ;; Returns:
+    ;;   An integer: the sum of all amounts in CREATE_COIN conditions.
+    ;;
+    ;; ================================================================
+    ;; HOW THE RECURSION WORKS:
+    ;; ================================================================
+    ;;
+    ;; CLVM has no loops, so we use recursion to iterate over the list.
+    ;; The pattern is:
+    ;;
+    ;;   (if list_not_empty
+    ;;       (process_first_element + recurse_on_rest)
+    ;;       base_case_value
+    ;;   )
+    ;;
+    ;; For our scanning function:
+    ;;   - Base case: empty list => return 0 (no more coins to count)
+    ;;   - Recursive case: check the first condition
+    ;;     - If it is CREATE_COIN: add its amount + recurse on the rest
+    ;;     - If it is something else: skip it, recurse on the rest
+    ;;
+    ;; ================================================================
+    ;; NAVIGATING THE CONDITION STRUCTURE:
+    ;; ================================================================
+    ;;
+    ;; conditions = ((51 0xabc 500) (50 0xkey msg) (51 0xdef 300))
+    ;;
+    ;; (f conditions) = (51 0xabc 500)         ; first condition
+    ;; (r conditions) = ((50 0xkey msg) ...)   ; rest of conditions
+    ;;
+    ;; For a single condition like (51 0xabc 500):
+    ;;   (f condition) = 51                     ; the opcode
+    ;;   (r condition) = (0xabc 500)            ; after the opcode
+    ;;   (r (r condition)) = (500)              ; after puzzle_hash
+    ;;   (f (r (r condition))) = 500            ; the amount value
+    ;;
+    ;; Combining both navigations:
+    ;;   opcode: (f (f conditions))             ; first of first
+    ;;   amount: (f (r (r (f conditions))))     ; first.rest.rest.first
+    ;; ================================================================
+
+    (defun sum_create_coins (conditions)
+        (if conditions
+            ; There are still conditions to process.
+            ; Check if the first condition's opcode is CREATE_COIN (51).
+            (if (= (f (f conditions)) CREATE_COIN)
+
+                ; --- This IS a CREATE_COIN condition ---
+                ;
+                ; Extract the amount and add it to the recursive sum.
+                ;
+                ; The amount is the THIRD element of the condition:
+                ;   condition = (51 puzzle_hash amount)
+                ;
+                ; Navigation step by step:
+                ;   (f conditions)             = (51 puzzle_hash amount)
+                ;   (r (f conditions))         = (puzzle_hash amount)
+                ;   (r (r (f conditions)))     = (amount)
+                ;   (f (r (r (f conditions)))) = amount
+                ;
+                ; We add this amount to the result of scanning the
+                ; remaining conditions (r conditions).
+                (+
+                    (f (r (r (f conditions))))      ; this condition's amount
+                    (sum_create_coins (r conditions)) ; sum of the rest
+                )
+
+                ; --- This is NOT a CREATE_COIN condition ---
+                ;
+                ; Skip it and continue scanning the rest of the list.
+                ; Other conditions (like AGG_SIG_ME, ASSERT_MY_AMOUNT,
+                ; CREATE_PUZZLE_ANNOUNCEMENT, etc.) do not create new
+                ; coins, so they are not counted toward the limit.
+                (sum_create_coins (r conditions))
+            )
+
+            ; --- Base case: empty list ---
+            ;
+            ; No more conditions to scan. Return 0.
+            ; This is the "bottom" of the recursion -- when we have
+            ; processed every condition in the list, the remaining
+            ; sum is zero.
+            0
+        )
+    )
+
+    ;; ================================================================
+    ;; MAIN LOGIC
+    ;; ================================================================
+
+    ; Step 1: Run the inner puzzle to get its conditions.
+    ;
+    ; The (a INNER_PUZZLE inner_solution) expression applies (runs) the
+    ; inner puzzle program with the inner solution as its arguments.
+    ; The inner puzzle returns a list of conditions -- these represent
+    ; what the inner puzzle wants to happen (send coins, require
+    ; signatures, make assertions, etc.).
+    ;
+    ; For example, if INNER_PUZZLE is a standard transaction and the
+    ; owner wants to send 500 mojos to puzzle_hash 0xabc:
+    ;   inner_conditions = ((51 0xabc 500) (50 0xowner_key msg))
+
+    (assign
+        inner_conditions (a INNER_PUZZLE inner_solution)
+
+        ; Step 2: Sum up all the CREATE_COIN amounts.
+        ;
+        ; We scan through every condition the inner puzzle returned.
+        ; Whenever we find a CREATE_COIN (opcode 51), we add its
+        ; amount to the running total. Non-CREATE_COIN conditions
+        ; (signatures, assertions, announcements) are ignored.
+        total_output (sum_create_coins inner_conditions)
+
+        ; Step 3: Enforce the spending limit.
+        ;
+        ; Compare the total CREATE_COIN output against MAX_AMOUNT.
+        ;
+        ; If total_output > MAX_AMOUNT:
+        ;   The spend is REJECTED. We call (x ...) which raises an
+        ;   exception, aborting execution. The coin remains unspent
+        ;   and its mojos are safe. The error message and values are
+        ;   included for debugging.
+        ;
+        ; If total_output <= MAX_AMOUNT:
+        ;   The spend is ALLOWED. We return inner_conditions unchanged.
+        ;   The blockchain will process them normally -- creating coins,
+        ;   verifying signatures, checking assertions, etc. The outer
+        ;   puzzle does not need to add any conditions of its own because
+        ;   the rate-limit check itself is the entire restriction.
+        (if (> total_output MAX_AMOUNT)
+
+            ; FAIL: spending limit exceeded.
+            ; The (x) operator raises an exception with a message.
+            ; Arguments after the message are included for debugging.
+            (x "Spend exceeds rate limit" total_output MAX_AMOUNT)
+
+            ; SUCCESS: total is within the limit.
+            ; Return the inner conditions as our puzzle output.
+            inner_conditions
+        )
+    )
+)

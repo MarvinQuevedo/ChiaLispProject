@@ -1,0 +1,220 @@
+;;; ============================================================================
+;;; cat_with_custom_inner.clsp - CAT with Password + Signature Inner Puzzle
+;;; ============================================================================
+;;;
+;;; This file demonstrates the COMPOSITION PATTERN that makes CATs so powerful.
+;;;
+;;; THE KEY INSIGHT:
+;;; ----------------
+;;; The CAT outer puzzle does not care what the inner puzzle is. It only cares
+;;; about enforcing token rules (conservation, lineage). The inner puzzle
+;;; controls WHO can spend the coin and WHAT conditions are generated.
+;;;
+;;; This means you can put ANY inner puzzle inside a CAT:
+;;;   - Standard transaction (most common)
+;;;   - Password-protected
+;;;   - Multisig
+;;;   - Time-locked
+;;;   - Custom logic of any kind
+;;;
+;;; THIS EXAMPLE:
+;;; -------------
+;;; We create a custom inner puzzle that requires BOTH:
+;;;   1. Knowledge of a secret password (preimage of a hash)
+;;;   2. A valid signature from an authorized public key
+;;;
+;;; This is a "two-factor" puzzle: you need something you KNOW (password)
+;;; AND something you HAVE (the private key).
+;;;
+;;; HOW COMPOSITION WORKS:
+;;; ----------------------
+;;;
+;;;   Full CAT coin puzzle:
+;;;   +-------------------------------------------------------+
+;;;   |  CAT Outer Puzzle (cat_v2.clvm)                       |
+;;;   |  Curried: MOD_HASH, TAIL_HASH, INNER_PUZZLE           |
+;;;   |                                                       |
+;;;   |  +--------------------------------------------------+ |
+;;;   |  |  THIS PUZZLE (password_and_sig_inner.clsp)       | |
+;;;   |  |  Curried: PASSWORD_HASH, AUTHORIZED_PUBKEY       | |
+;;;   |  |                                                  | |
+;;;   |  |  Requires:                                       | |
+;;;   |  |    - password (preimage of PASSWORD_HASH)        | |
+;;;   |  |    - signature from AUTHORIZED_PUBKEY            | |
+;;;   |  |    - list of conditions to output                | |
+;;;   |  +--------------------------------------------------+ |
+;;;   |                                                       |
+;;;   |  CAT outer:                                           |
+;;;   |    1. Runs inner puzzle -> gets conditions             |
+;;;   |    2. Wraps CREATE_COIN in CAT puzzle                 |
+;;;   |    3. Checks conservation                             |
+;;;   |    4. Verifies lineage                                |
+;;;   +-------------------------------------------------------+
+;;;
+;;; When the inner puzzle returns conditions like:
+;;;   (CREATE_COIN some_inner_puzzle_hash 500)
+;;;
+;;; The CAT outer puzzle transforms this to:
+;;;   (CREATE_COIN (cat_wrapped_puzzle_hash some_inner_puzzle_hash) 500)
+;;;
+;;; The inner puzzle does NOT need to know it's inside a CAT. It just returns
+;;; normal conditions, and the CAT outer handles the wrapping.
+;;; ============================================================================
+
+;; ============================================================================
+;; THE INNER PUZZLE: Password + Signature
+;; ============================================================================
+;;
+;; This is the inner puzzle that will be placed inside the CAT outer puzzle.
+;; When used standalone, it would be a regular coin puzzle. When used inside
+;; a CAT, it controls spending of the CAT tokens.
+;; ============================================================================
+
+(mod (
+      ;; --- Curried Parameters (baked into the puzzle) ---
+      PASSWORD_HASH         ; bytes32: sha256 hash of the secret password
+      AUTHORIZED_PUBKEY     ; G1Point (48 bytes): public key that must sign
+
+      ;; --- Solution Parameters (provided at spend time) ---
+      password              ; bytes: the actual password (preimage of PASSWORD_HASH)
+      conditions            ; list: the conditions to output (CREATE_COIN, etc.)
+     )
+
+  ;; -------------------------------------------------------------------------
+  ;; Standard includes for condition codes
+  ;; -------------------------------------------------------------------------
+  (include condition_codes.clib)
+
+  ;; =========================================================================
+  ;; HELPER: Verify the password
+  ;; =========================================================================
+  ;; We check that sha256(password) == PASSWORD_HASH.
+  ;; If the password is wrong, the assert fails and the spend is invalid.
+  ;; =========================================================================
+
+  (defun verify_password (PASSWORD_HASH password)
+    (if (= (sha256 password) PASSWORD_HASH)
+      1           ;; Password correct, return true
+      (x)         ;; Password wrong, raise exception (spend fails)
+    )
+  )
+
+  ;; =========================================================================
+  ;; HELPER: Add signature requirement to conditions
+  ;; =========================================================================
+  ;; We prepend an AGG_SIG_ME condition to the user's conditions list.
+  ;; AGG_SIG_ME (code 50) requires that AUTHORIZED_PUBKEY signed a message
+  ;; that includes this coin's ID, preventing signature replay.
+  ;;
+  ;; The message we require to be signed is the tree hash of the conditions.
+  ;; This ensures the signer explicitly approves exactly these conditions.
+  ;; =========================================================================
+
+  (defun add_signature_condition (AUTHORIZED_PUBKEY conditions)
+    (c
+      ;; Prepend the signature condition
+      (list AGG_SIG_ME
+            AUTHORIZED_PUBKEY
+            (sha256tree1 conditions)   ;; Sign the hash of the conditions
+      )
+      ;; Followed by the rest of the conditions
+      conditions
+    )
+  )
+
+  ;; =========================================================================
+  ;; MAIN LOGIC
+  ;; =========================================================================
+  ;;
+  ;; 1. Verify the password is correct.
+  ;; 2. Add a signature requirement (AGG_SIG_ME) to the conditions.
+  ;; 3. Return the final conditions list.
+  ;;
+  ;; The CAT outer puzzle will then:
+  ;; - Take these conditions
+  ;; - Wrap any CREATE_COIN puzzle hashes in the CAT puzzle
+  ;; - Add conservation and lineage checks
+  ;; =========================================================================
+
+  ;; First, verify the password (this will crash if wrong)
+  (if (verify_password PASSWORD_HASH password)
+
+    ;; Password is correct! Now return conditions with signature requirement.
+    (add_signature_condition AUTHORIZED_PUBKEY conditions)
+
+    ;; This branch never executes because verify_password raises (x) on failure,
+    ;; but we include it for completeness.
+    (x)
+  )
+)
+
+;;; ============================================================================
+;;; HOW TO USE THIS AS A CAT INNER PUZZLE:
+;;; ============================================================================
+;;;
+;;; Step 1: Choose your password and generate the hash.
+;;;   password = "my_secret_password"
+;;;   PASSWORD_HASH = sha256("my_secret_password")
+;;;                 = 0x5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8
+;;;
+;;; Step 2: Choose your authorized public key.
+;;;   AUTHORIZED_PUBKEY = 0xa1b2c3... (48-byte G1 point)
+;;;
+;;; Step 3: Compile and curry this inner puzzle.
+;;;   cdv clsp build cat_with_custom_inner.clsp
+;;;   cdv clsp curry cat_with_custom_inner.clsp.hex \
+;;;     -a 0x5e884898... \
+;;;     -a 0xa1b2c3...
+;;;
+;;; Step 4: Use this curried puzzle as the INNER_PUZZLE in a CAT.
+;;;   cat_puzzle = construct_cat_puzzle(CAT_MOD, asset_id, curried_inner_puzzle)
+;;;
+;;; Step 5: To spend the CAT, the solution (for the inner puzzle) must include:
+;;;   - The actual password string
+;;;   - The list of conditions (what you want to do, e.g., send tokens)
+;;;
+;;;   inner_solution = (
+;;;     "my_secret_password"
+;;;     ((CREATE_COIN new_inner_puzzle_hash 500)
+;;;      (CREATE_COIN change_inner_puzzle_hash 300))
+;;;   )
+;;;
+;;;   The full CAT solution wraps this:
+;;;   cat_solution = (
+;;;     inner_solution          ; the above
+;;;     lineage_proof           ; parent info
+;;;     prev_coin_id            ; ring linkage
+;;;     this_coin_info          ; self info
+;;;     next_coin_proof         ; ring linkage
+;;;     prev_subtotal           ; conservation
+;;;     extra_delta             ; 0 for normal transfer
+;;;   )
+;;;
+;;; Step 6: The signer must also produce an AGG_SIG_ME signature:
+;;;   message = sha256tree(conditions_list)
+;;;   signature = sign(private_key, message + coin_id + AGG_SIG_ME_ADDITIONAL_DATA)
+;;;
+;;; ============================================================================
+;;; WHY THIS PATTERN IS POWERFUL:
+;;; ============================================================================
+;;;
+;;; 1. SEPARATION OF CONCERNS: The inner puzzle handles authentication (who can
+;;;    spend), and the CAT outer handles token rules (conservation, lineage).
+;;;
+;;; 2. REUSABILITY: This inner puzzle could be used in a regular (non-CAT) coin
+;;;    too. The same code works in both contexts.
+;;;
+;;; 3. COMPOSABILITY: You could layer more wrappers:
+;;;    Outer -> CAT -> Singleton -> This Inner Puzzle
+;;;    Each layer adds its own rules without interfering with others.
+;;;
+;;; 4. UPGRADABILITY: When you transfer tokens, the CREATE_COIN can specify a
+;;;    DIFFERENT inner puzzle. So you could move tokens from a password-protected
+;;;    puzzle to a standard transaction puzzle, or vice versa.
+;;;
+;;; This is the same pattern used throughout Chia:
+;;;   - CATs wrap inner puzzles
+;;;   - Singletons wrap inner puzzles
+;;;   - NFTs use CAT + Singleton + inner puzzles
+;;;   - DIDs use Singleton + inner puzzles
+;;; ============================================================================

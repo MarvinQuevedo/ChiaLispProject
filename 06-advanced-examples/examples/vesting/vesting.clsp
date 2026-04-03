@@ -1,0 +1,181 @@
+; =============================================================================
+; TOKEN VESTING PUZZLE
+; =============================================================================
+;
+; Implements a standard token vesting schedule with:
+;   - Cliff period: No tokens can be claimed until the cliff height
+;   - Linear vesting: After the cliff, tokens unlock proportionally
+;   - Full vesting: After the total period, everything is available
+;
+; This is commonly used for:
+;   - Team token allocations (prevent immediate dumping)
+;   - Investor lockups (align long-term incentives)
+;   - Advisor compensation (gradual release over service period)
+;
+; EXAMPLE SCHEDULE:
+;   Total amount: 1,000,000 tokens
+;   Cliff: 6 months (~829,440 blocks)
+;   Total vesting: 24 months (~3,317,760 blocks)
+;
+;   Month 0-6:   0 tokens available (cliff)
+;   Month 6:     250,000 tokens available (6/24 = 25%)
+;   Month 12:    500,000 tokens available (12/24 = 50%)
+;   Month 18:    750,000 tokens available (18/24 = 75%)
+;   Month 24:    1,000,000 tokens available (100%)
+;
+; CURRIED PARAMETERS:
+;   BENEFICIARY_PUBKEY      - Who receives the vesting tokens
+;   TOTAL_AMOUNT            - Total tokens to vest
+;   CLIFF_HEIGHT            - Absolute block height when cliff ends
+;   VESTING_START_HEIGHT    - Absolute block height when vesting started
+;   TOTAL_VESTING_BLOCKS    - Total blocks for full vesting (includes cliff)
+;   CLAIMED_AMOUNT          - How many tokens already claimed (state)
+;   MY_PUZZLE_HASH          - This puzzle's hash (for self-recreation)
+;
+; SOLUTION:
+;   mode                    - 0 = claim, 1 = view (no-op, just for driver)
+;   claim_amount            - How many tokens to claim
+;   current_height          - Current block height (verified by conditions)
+;
+; =============================================================================
+
+(mod
+  (
+    ; --- Curried parameters ---
+    BENEFICIARY_PUBKEY
+    TOTAL_AMOUNT
+    CLIFF_HEIGHT
+    VESTING_START_HEIGHT
+    TOTAL_VESTING_BLOCKS
+    CLAIMED_AMOUNT
+    MY_PUZZLE_HASH
+
+    ; --- Solution parameters ---
+    mode
+    claim_amount
+    current_height
+  )
+
+  (include condition_codes.clib)
+
+  ; =========================================================================
+  ; Helper: Calculate vested amount at a given height
+  ; =========================================================================
+  ; This is the core vesting formula:
+  ;
+  ;   If current_height < CLIFF_HEIGHT:
+  ;       vested = 0 (still in cliff period)
+  ;
+  ;   If current_height >= VESTING_START_HEIGHT + TOTAL_VESTING_BLOCKS:
+  ;       vested = TOTAL_AMOUNT (fully vested)
+  ;
+  ;   Otherwise (between cliff and full vest):
+  ;       elapsed = current_height - VESTING_START_HEIGHT
+  ;       vested = (TOTAL_AMOUNT * elapsed) / TOTAL_VESTING_BLOCKS
+  ;
+  ; Note: Integer division means there may be tiny rounding dust.
+  ; The "fully vested" path handles this by returning TOTAL_AMOUNT exactly.
+
+  (defun calc-vested (TOTAL_AMOUNT VESTING_START_HEIGHT TOTAL_VESTING_BLOCKS
+                      CLIFF_HEIGHT current_height)
+    (if (> CLIFF_HEIGHT current_height)
+      ; Before cliff -- nothing vested
+      0
+      (if (> current_height (+ VESTING_START_HEIGHT TOTAL_VESTING_BLOCKS))
+        ; After full vesting period -- everything vested
+        TOTAL_AMOUNT
+        ; During linear vesting -- proportional calculation
+        (/ (* TOTAL_AMOUNT (- current_height VESTING_START_HEIGHT))
+           TOTAL_VESTING_BLOCKS)
+      )
+    )
+  )
+
+  ; =========================================================================
+  ; Helper: Calculate claimable amount (vested minus already claimed)
+  ; =========================================================================
+
+  (defun calc-claimable (TOTAL_AMOUNT VESTING_START_HEIGHT TOTAL_VESTING_BLOCKS
+                         CLIFF_HEIGHT CLAIMED_AMOUNT current_height)
+    (- (calc-vested TOTAL_AMOUNT VESTING_START_HEIGHT TOTAL_VESTING_BLOCKS
+                    CLIFF_HEIGHT current_height)
+       CLAIMED_AMOUNT)
+  )
+
+  ; =========================================================================
+  ; MODE 0 -- CLAIM VESTED TOKENS
+  ; =========================================================================
+  ; The beneficiary claims some or all of their vested tokens.
+  ;
+  ; The puzzle verifies:
+  ;   1. The current height is past the cliff (via calc-vested)
+  ;   2. The claim amount does not exceed the claimable amount
+  ;   3. The beneficiary has signed
+  ;   4. The current height is verified via ASSERT_HEIGHT_ABSOLUTE
+  ;
+  ; After claiming:
+  ;   - If there are still unvested tokens: recreate the coin with
+  ;     updated CLAIMED_AMOUNT and reduced balance
+  ;   - If all tokens are claimed: no recreation needed
+  ;
+  ; NOTE: The coin recreates itself with the SAME puzzle hash structure
+  ; but different curried CLAIMED_AMOUNT. In this simplified version,
+  ; we pass MY_PUZZLE_HASH from the solution. A production version would
+  ; compute the new puzzle hash by re-currying on-chain.
+
+  (defun claim-tokens (BENEFICIARY_PUBKEY TOTAL_AMOUNT VESTING_START_HEIGHT
+                       TOTAL_VESTING_BLOCKS CLIFF_HEIGHT CLAIMED_AMOUNT
+                       MY_PUZZLE_HASH claim_amount current_height)
+    ; Calculate how much is claimable right now
+    (if (> claim_amount
+           (calc-claimable TOTAL_AMOUNT VESTING_START_HEIGHT TOTAL_VESTING_BLOCKS
+                           CLIFF_HEIGHT CLAIMED_AMOUNT current_height))
+      ; Trying to claim more than vested -- FAIL
+      (x "Claim exceeds vested amount")
+
+      ; Claim is valid -- produce conditions
+      (if (= claim_amount (- TOTAL_AMOUNT CLAIMED_AMOUNT))
+        ; Claiming everything remaining -- no need to recreate the coin
+        (list
+          ; Verify the block height
+          (list ASSERT_HEIGHT_ABSOLUTE current_height)
+          ; Beneficiary must sign
+          (list AGG_SIG_ME BENEFICIARY_PUBKEY (sha256 claim_amount))
+          ; Announce the final claim
+          (list CREATE_COIN_ANNOUNCEMENT (sha256 "vesting_complete"))
+        )
+        ; Partial claim -- recreate the coin with updated state
+        (list
+          ; Verify the block height
+          (list ASSERT_HEIGHT_ABSOLUTE current_height)
+          ; Beneficiary must sign
+          (list AGG_SIG_ME BENEFICIARY_PUBKEY (sha256 claim_amount))
+          ; Recreate the vesting coin with:
+          ;   - Same puzzle (new CLAIMED_AMOUNT would be curried by driver)
+          ;   - Reduced amount: original amount minus claim_amount
+          (list CREATE_COIN MY_PUZZLE_HASH
+                (- (- TOTAL_AMOUNT CLAIMED_AMOUNT) claim_amount))
+          ; Announce the partial claim
+          (list CREATE_COIN_ANNOUNCEMENT
+            (sha256 "vesting_claim" claim_amount))
+        )
+      )
+    )
+  )
+
+  ; =========================================================================
+  ; MAIN ENTRY POINT
+  ; =========================================================================
+
+  (if (= mode 0)
+    (claim-tokens BENEFICIARY_PUBKEY TOTAL_AMOUNT VESTING_START_HEIGHT
+                  TOTAL_VESTING_BLOCKS CLIFF_HEIGHT CLAIMED_AMOUNT
+                  MY_PUZZLE_HASH claim_amount current_height)
+    ; Mode 1 (or any other) -- just require beneficiary signature
+    ; This is a "ping" mode useful for the driver to verify the coin exists
+    (list
+      (list AGG_SIG_ME BENEFICIARY_PUBKEY (sha256 "view"))
+      (list REMARK)
+    )
+  )
+)

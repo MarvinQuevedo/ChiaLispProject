@@ -1,0 +1,249 @@
+;;; ============================================================================
+;;; stake_lock.clsp - Stake Lock Puzzle
+;;; ============================================================================
+;;;
+;;; This puzzle locks staked CAT tokens (plus their reward) until a specified
+;;; block height is reached. It is created by the staking pool when a user
+;;; stakes, and can only be spent (claimed) by the staker after the lock
+;;; period expires.
+;;;
+;;; OVERVIEW
+;;; --------
+;;; When a user stakes tokens, the staking pool creates a new coin with this
+;;; puzzle. The puzzle is curried with:
+;;;   - The staker's public key (so only they can claim)
+;;;   - The stake amount (for verification and tracking)
+;;;   - The reward amount (for verification and tracking)
+;;;   - The unlock height (current height + lock_blocks from chosen tier)
+;;;   - The CAT TAIL hash (asset identification)
+;;;
+;;; The coin sits on-chain, unspendable, until the blockchain reaches the
+;;; unlock height. At that point, the staker provides a solution to claim
+;;; the full amount (stake + reward).
+;;;
+;;; SECURITY PROPERTIES
+;;; -------------------
+;;; 1. TIME LOCK: ASSERT_HEIGHT_ABSOLUTE ensures the coin cannot be spent
+;;;    before the unlock height. Enforced by Chia consensus -- no bypass.
+;;;
+;;; 2. OWNERSHIP: AGG_SIG_ME requires a valid BLS signature from the staker,
+;;;    bound to this specific coin. No one else can claim, not even the
+;;;    pool operator.
+;;;
+;;; 3. AMOUNT INTEGRITY: The coin amount is verified against the curried
+;;;    values (STAKE_AMOUNT + REWARD_AMOUNT).
+;;;
+;;; 4. IDENTITY: ASSERT_MY_COIN_ID binds the solution to this exact coin,
+;;;    preventing solution replay on other lock coins.
+;;;
+;;; CURRIED PARAMETERS
+;;; ------------------
+;;;   STAKER_PUBKEY   - (G1Element, 48 bytes) The staker's BLS public key.
+;;;
+;;;   STAKE_AMOUNT    - (int) The amount the user originally staked, in mojos.
+;;;                     Used to verify the total coin amount.
+;;;
+;;;   REWARD_AMOUNT   - (int) The calculated reward, in mojos.
+;;;                     The coin should hold STAKE_AMOUNT + REWARD_AMOUNT.
+;;;
+;;;   UNLOCK_HEIGHT   - (int) Absolute block height when tokens unlock.
+;;;                     Calculated as: height_at_stake_time + lock_blocks.
+;;;
+;;;   CAT_TAIL_HASH   - (bytes32) Asset ID of the CAT token.
+;;;                     Curried for identification and tracking purposes.
+;;; ============================================================================
+
+(mod
+  (
+    ; --- Curried parameters (baked in when lock coin is created) ---
+    STAKER_PUBKEY       ; BLS public key of the staker
+    STAKE_AMOUNT        ; Original amount staked
+    REWARD_AMOUNT       ; Calculated reward amount
+    UNLOCK_HEIGHT       ; Block height when tokens unlock
+    CAT_TAIL_HASH       ; Asset ID of the CAT token
+
+    ; --- Solution parameters (provided when claiming) ---
+    mode                ; 0 = claim (only supported mode)
+    destination_ph      ; Where to send the unlocked tokens
+    my_coin_id          ; This coin's ID (for ASSERT_MY_COIN_ID)
+    my_amount           ; This coin's amount (for ASSERT_MY_AMOUNT)
+  )
+
+  ; ========================================================================
+  ; DEFINITIONS
+  ; ========================================================================
+
+  (defconstant CREATE_COIN 51)
+  (defconstant CREATE_COIN_ANNOUNCEMENT 60)
+  (defconstant ASSERT_MY_COIN_ID 70)
+  (defconstant ASSERT_MY_AMOUNT 73)
+  (defconstant AGG_SIG_ME 50)
+  (defconstant ASSERT_HEIGHT_ABSOLUTE 82)
+
+  ; ========================================================================
+  ; MAIN LOGIC
+  ; ========================================================================
+
+  (if (= mode 0)
+
+    ; ==================================================================
+    ; MODE 0: CLAIM -- Claim locked tokens after unlock height
+    ; ==================================================================
+    ;
+    ; The staker provides:
+    ;   - destination_ph: Puzzle hash where they receive their tokens.
+    ;     Typically their standard wallet puzzle hash.
+    ;   - my_coin_id: This lock coin's ID (verified by ASSERT_MY_COIN_ID).
+    ;   - my_amount: This coin's amount (should = STAKE_AMOUNT + REWARD_AMOUNT).
+    ;
+    ; The puzzle produces 5 conditions that must ALL be satisfied:
+    ; ==================================================================
+
+    ; First, verify the amount matches expectations
+    (if (= my_amount (+ STAKE_AMOUNT REWARD_AMOUNT))
+
+      (list
+        ; ---------------------------------------------------------------
+        ; CONDITION 1: ASSERT_MY_COIN_ID
+        ; ---------------------------------------------------------------
+        ; Binds this solution to this specific coin. Prevents replay:
+        ; an attacker cannot take a valid claim transaction and apply it
+        ; to a different lock coin.
+        ; ---------------------------------------------------------------
+        (list ASSERT_MY_COIN_ID my_coin_id)
+
+        ; ---------------------------------------------------------------
+        ; CONDITION 2: ASSERT_MY_AMOUNT
+        ; ---------------------------------------------------------------
+        ; Verifies the on-chain coin amount matches what we expect.
+        ; Together with the (= my_amount ...) check above, this ensures
+        ; the coin holds exactly stake + reward.
+        ; ---------------------------------------------------------------
+        (list ASSERT_MY_AMOUNT my_amount)
+
+        ; ---------------------------------------------------------------
+        ; CONDITION 3: ASSERT_HEIGHT_ABSOLUTE -- THE TIME LOCK
+        ; ---------------------------------------------------------------
+        ; This is the core security mechanism. It tells the blockchain:
+        ; "Do NOT include this spend in any block whose height is less
+        ;  than UNLOCK_HEIGHT."
+        ;
+        ; This is a consensus-level rule. There is NO way to bypass it.
+        ; The coin is unspendable until the specified height.
+        ;
+        ; Example: If UNLOCK_HEIGHT = 1,138,240 and current height is
+        ; 1,000,000, the spend will be rejected for another 138,240
+        ; blocks (~30 days).
+        ; ---------------------------------------------------------------
+        (list ASSERT_HEIGHT_ABSOLUTE UNLOCK_HEIGHT)
+
+        ; ---------------------------------------------------------------
+        ; CONDITION 4: AGG_SIG_ME -- Staker authorization
+        ; ---------------------------------------------------------------
+        ; Requires a BLS signature from the staker's private key.
+        ;
+        ; AGG_SIG_ME is special: the signed message includes the coin ID
+        ; and the genesis challenge, so:
+        ;   - Signature is bound to THIS coin (cannot replay)
+        ;   - Signature is bound to THIS blockchain (mainnet vs testnet)
+        ;
+        ; The staker signs the destination_ph, binding the signature to
+        ; where the tokens go. This prevents an attacker from intercepting
+        ; the transaction and changing the destination.
+        ; ---------------------------------------------------------------
+        (list AGG_SIG_ME STAKER_PUBKEY destination_ph)
+
+        ; ---------------------------------------------------------------
+        ; CONDITION 5: CREATE_COIN -- Send tokens to staker
+        ; ---------------------------------------------------------------
+        ; Creates the output coin with the full amount (stake + reward)
+        ; at the staker's chosen destination puzzle hash.
+        ; ---------------------------------------------------------------
+        (list CREATE_COIN destination_ph (+ STAKE_AMOUNT REWARD_AMOUNT))
+
+        ; ---------------------------------------------------------------
+        ; CONDITION 6: Announce the claim for tracking
+        ; ---------------------------------------------------------------
+        ; Other systems or off-chain indexers can monitor for this
+        ; announcement to track when stakes are claimed.
+        ; ---------------------------------------------------------------
+        (list CREATE_COIN_ANNOUNCEMENT
+          (sha256 "stake_claimed" STAKER_PUBKEY STAKE_AMOUNT REWARD_AMOUNT))
+      )
+
+      ; Amount mismatch -- the coin does not hold the expected total
+      (x "Amount mismatch: coin amount does not match stake + reward")
+    )
+
+    ; ==================================================================
+    ; INVALID MODE
+    ; ==================================================================
+    ; Only mode 0 (claim) is supported. Future extensions could add:
+    ;   - Mode 1: Emergency withdrawal with penalty
+    ;   - Mode 2: Transfer stake to another key
+    ; For now, any other mode fails.
+    ; ==================================================================
+    (x "Invalid mode: only claim (mode 0) is supported")
+  )
+)
+
+;;; ============================================================================
+;;; STATE DIAGRAM
+;;; ============================================================================
+;;;
+;;;   +---------------------------+
+;;;   | Stake Lock Coin           |
+;;;   |                           |
+;;;   | STAKER_PUBKEY: 0xabc...   |
+;;;   | STAKE_AMOUNT: 1000        |
+;;;   | REWARD_AMOUNT: 50         |
+;;;   | UNLOCK_HEIGHT: 1,138,240  |
+;;;   | amount: 1050 (on-chain)   |
+;;;   +---------------------------+
+;;;               |
+;;;               | Wait until blockchain height >= 1,138,240
+;;;               |
+;;;               v
+;;;   +---------------------------+
+;;;   | Claim Transaction         |
+;;;   |                           |
+;;;   | solution:                 |
+;;;   |   mode: 0                 |
+;;;   |   destination_ph: 0xdef.. |
+;;;   |   my_coin_id: 0x123...    |
+;;;   |   my_amount: 1050         |
+;;;   +---------------------------+
+;;;               |
+;;;               | Conditions checked:
+;;;               |   height >= 1,138,240?  YES
+;;;               |   signature valid?      YES
+;;;               |   amount = 1050?        YES
+;;;               |
+;;;               v
+;;;   +---------------------------+
+;;;   | Output Coin               |
+;;;   |                           |
+;;;   | puzzle_hash: 0xdef...     |  <-- Staker's wallet
+;;;   | amount: 1050              |  <-- Stake (1000) + Reward (50)
+;;;   +---------------------------+
+;;;
+;;; ============================================================================
+;;;
+;;; IMPORTANT NOTES
+;;; ============================================================================
+;;;
+;;; 1. This puzzle is intentionally simple. Each lock coin handles exactly one
+;;;    stake from one user. No partial claims or early withdrawals.
+;;;
+;;; 2. Separating STAKE_AMOUNT and REWARD_AMOUNT (rather than just TOTAL_AMOUNT)
+;;;    makes the coin self-documenting: anyone inspecting the puzzle can see
+;;;    exactly how much was staked and how much was earned.
+;;;
+;;; 3. If the staker loses their private key, the tokens are locked forever.
+;;;    A production system might include a recovery mechanism or a very long
+;;;    timeout escape hatch.
+;;;
+;;; 4. In a production CAT system, this puzzle would serve as the inner puzzle
+;;;    of a CAT coin. The CAT layer adds TAIL verification and lineage proofs
+;;;    on top of these conditions.
+;;; ============================================================================

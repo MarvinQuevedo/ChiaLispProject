@@ -1,0 +1,82 @@
+; ============================================
+; timelocked_wrapper.clsp — Generic Time Lock Outer Puzzle
+; ============================================
+;
+; This puzzle demonstrates the POWER of the inner puzzle pattern.
+; It wraps ANY inner puzzle and adds a time lock restriction.
+;
+; The inner puzzle handles ownership/authorization.
+; This outer puzzle ONLY adds: "you must also wait N blocks."
+;
+; CURRIED PARAMETERS:
+;   LOCK_HEIGHT  - Number of blocks to wait after coin creation
+;   INNER_PUZZLE - Any ChiaLisp puzzle (e.g., signature-locked, password, etc.)
+;
+; SOLUTION:
+;   inner_solution - The solution for the inner puzzle
+;
+; COMPILE:
+;   run -i include_files/ timelocked_wrapper.clsp
+;
+; CURRY EXAMPLE (lock for 100 blocks, with a signature puzzle inside):
+;   cdv clsp curry timelocked_wrapper.clsp -a 100 -a 0x<inner_puzzle_hex>
+
+(mod (LOCK_HEIGHT INNER_PUZZLE inner_solution)
+
+  ; ---------------------------------------------------------------
+  ; Step 1: Define condition opcodes
+  ; ---------------------------------------------------------------
+  (defconstant ASSERT_HEIGHT_RELATIVE 82)
+
+  ; ---------------------------------------------------------------
+  ; Step 2: Combine time lock with inner puzzle output
+  ; ---------------------------------------------------------------
+  ; Pattern: prepend our condition to the inner puzzle's conditions
+  ;
+  ; (a INNER_PUZZLE inner_solution) runs the inner puzzle
+  ; (c our_condition inner_results) prepends our condition
+
+  (c
+    ; Our time lock condition
+    ; ASSERT_HEIGHT_RELATIVE: coin cannot be spent until LOCK_HEIGHT
+    ; blocks have passed since this coin was created on chain.
+    (list ASSERT_HEIGHT_RELATIVE LOCK_HEIGHT)
+
+    ; Run the inner puzzle and include ALL its conditions
+    ; The inner puzzle handles ownership (e.g., signature checks)
+    ; We don't modify its conditions — just add our time restriction
+    (a INNER_PUZZLE inner_solution)
+  )
+)
+
+; ============================================
+; HOW THIS WORKS IN PRACTICE:
+;
+; Say you have a signature-locked puzzle that lets Alice spend:
+;   inner_puzzle = (mod (conditions) (c (AGG_SIG_ME ALICE_PK ...) conditions))
+;
+; Wrapping it with timelocked_wrapper(100, inner_puzzle) means:
+;   "Alice can spend, BUT only after 100 blocks (~31 minutes)"
+;
+; The combined output:
+;   (
+;     (ASSERT_HEIGHT_RELATIVE 100)     <- from outer (time lock)
+;     (AGG_SIG_ME ALICE_PK ...)        <- from inner (signature)
+;     (CREATE_COIN 0xABC... 1000)      <- from inner (create coin)
+;   )
+;
+; THE COMPOSITION PATTERN:
+;   You can stack wrappers! For example:
+;   timelocked_wrapper(100,
+;     rate_limited_wallet(5000,
+;       signature_locked(ALICE_PK)))
+;
+;   = "Alice can spend up to 5000 mojos, but only after 100 blocks"
+;
+; This is exactly how Chia's ecosystem works:
+;   - CAT puzzle wraps standard_transaction
+;   - NFT puzzle wraps singleton wraps standard_transaction
+;   - DID puzzle wraps singleton wraps standard_transaction
+;
+; Each layer adds its own rules without knowing what's inside.
+; ============================================

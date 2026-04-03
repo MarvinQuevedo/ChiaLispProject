@@ -1,0 +1,220 @@
+;;; multi_sig.clsp
+;;;
+;;; A 2-of-3 multisig puzzle. Three public keys are curried in at
+;;; compile time. At spend time, exactly two of the three key holders
+;;; must provide their signatures to authorize the spend.
+;;;
+;;; This demonstrates:
+;;; - Currying multiple parameters (three public keys)
+;;; - Using AGG_SIG_ME to require BLS signatures
+;;; - Selection logic: the spender chooses which two keys sign
+;;;
+;;; CURRIED PARAMETERS:
+;;;   PK1 - Public key of the first signer  (48 bytes, BLS G1 point)
+;;;   PK2 - Public key of the second signer (48 bytes, BLS G1 point)
+;;;   PK3 - Public key of the third signer  (48 bytes, BLS G1 point)
+;;;
+;;; SOLUTION PARAMETERS:
+;;;   selector     - Which pair of keys is signing. Must be one of:
+;;;                    1 = PK1 + PK2
+;;;                    2 = PK1 + PK3
+;;;                    3 = PK2 + PK3
+;;;   conditions   - The list of conditions the signers authorize.
+;;;                  For example: ((51 0xabc... 1000))
+;;;                  Both signers must sign the hash of these conditions.
+;;;
+;;; =====================================================================
+;;; SECURITY MODEL:
+;;; =====================================================================
+;;;
+;;; - Any 2 of the 3 key holders can authorize a spend.
+;;; - A single compromised key is NOT enough to steal funds.
+;;; - The AGG_SIG_ME condition binds the signature to:
+;;;     1. The specific coin being spent (via coin_id in the message)
+;;;     2. The hash of the conditions being authorized
+;;;   This prevents replay attacks and condition manipulation.
+;;;
+;;; Why do we hash the conditions?
+;;;   The signers need to agree on WHAT they are authorizing. By signing
+;;;   the sha256tree of the conditions list, both signers commit to the
+;;;   exact set of outputs (where coins go, how much, etc.). If an
+;;;   attacker tried to modify the conditions after signing, the
+;;;   signature would be invalid.
+;;;
+;;; Why AGG_SIG_ME instead of AGG_SIG_UNSAFE?
+;;;   AGG_SIG_ME automatically includes the coin_id in the signed
+;;;   message. This means a signature for coin A cannot be reused to
+;;;   spend coin B, even if both coins use the same puzzle with the
+;;;   same public keys. AGG_SIG_UNSAFE does not include this protection
+;;;   and should be avoided in most cases.
+;;;
+;;; What about the selector?
+;;;   The selector is NOT signed. However, this is safe because:
+;;;   - The selector only determines WHICH two keys are required.
+;;;   - The actual signatures must still be valid for those keys.
+;;;   - An attacker cannot change the selector to use a different pair
+;;;     because they would need valid signatures from that pair.
+;;;   - The conditions (which ARE signed) determine the actual spend.
+;;;
+;;; =====================================================================
+;;; EXECUTION FLOW:
+;;; =====================================================================
+;;;
+;;; 1. Two key holders agree on what conditions they want to authorize
+;;; 2. They compute conditions_hash = sha256tree(conditions)
+;;; 3. Each signs the conditions_hash with their BLS private key
+;;; 4. The spender submits solution: (selector conditions)
+;;; 5. This puzzle:
+;;;    a. Computes sha256tree(conditions)
+;;;    b. Checks the selector to determine which two keys must sign
+;;;    c. Outputs AGG_SIG_ME for each required key
+;;;    d. Appends the authorized conditions
+;;; 6. The blockchain validates both BLS signatures
+;;; 7. The blockchain processes all conditions
+;;;
+;;; =====================================================================
+;;; EXAMPLE:
+;;; =====================================================================
+;;;
+;;; Setup:
+;;;   PK1 = 0xa1... (Alice's key)
+;;;   PK2 = 0xb2... (Bob's key)
+;;;   PK3 = 0xc3... (Carol's key)
+;;;   Curried: cdv clsp curry multi_sig.clsp -a 0xa1... -a 0xb2... -a 0xc3...
+;;;
+;;; Spending with Alice + Carol (selector = 2):
+;;;   conditions = ((51 0xrecipient_hash 1000))
+;;;   conditions_hash = sha256tree(conditions) = 0xabc...
+;;;   Alice signs 0xabc... with her private key
+;;;   Carol signs 0xabc... with her private key
+;;;   Solution: (2 ((51 0xrecipient_hash 1000)))
+;;;
+;;; Output conditions:
+;;;   (50 0xa1... 0xabc...)        ; AGG_SIG_ME: Alice must sign
+;;;   (50 0xc3... 0xabc...)        ; AGG_SIG_ME: Carol must sign
+;;;   (51 0xrecipient_hash 1000)   ; The actual spending condition
+;;;
+
+; Condition codes
+(defconstant AGG_SIG_ME 50)
+
+(mod (PK1 PK2 PK3 selector conditions)
+
+    ;; ================================================================
+    ;; sha256tree -- Compute the treehash of a CLVM value.
+    ;;
+    ;; This is needed to create the message that signers will sign.
+    ;; The treehash of the conditions list serves as a commitment:
+    ;; by signing this hash, the signers authorize exactly these
+    ;; conditions and no others.
+    ;;
+    ;; How it works:
+    ;;   - If the value is a pair (cons cell):
+    ;;       sha256(0x02 + treehash(left) + treehash(right))
+    ;;   - If the value is an atom (leaf):
+    ;;       sha256(0x01 + atom_bytes)
+    ;;
+    ;; The (l value) operator returns true if value is a pair (list),
+    ;; false if it is an atom. This lets us distinguish the two cases.
+    ;;
+    ;; The 0x01/0x02 prefixes prevent type confusion: an atom that
+    ;; happens to look like the concatenation of two hashes cannot
+    ;; collide with a pair of those two values.
+    ;; ================================================================
+
+    (defun sha256tree (value)
+        (if (l value)
+            ; It is a pair (cons cell): hash both subtrees
+            (sha256 0x02
+                (sha256tree (f value))
+                (sha256tree (r value))
+            )
+            ; It is an atom (leaf node): hash with atom prefix
+            (sha256 0x01 value)
+        )
+    )
+
+    ;; ================================================================
+    ;; MAIN LOGIC
+    ;; ================================================================
+
+    ; Compute the hash of the conditions the signers are authorizing.
+    ; This hash becomes the message in the AGG_SIG_ME conditions.
+    ; Both signers must sign this exact hash, proving they agreed on
+    ; exactly these conditions.
+    (assign
+        conditions_hash (sha256tree conditions)
+
+        ; Select which two keys must sign based on the selector value.
+        ;
+        ; The selector maps to key pairs:
+        ;   1 => PK1 + PK2 (first and second signers)
+        ;   2 => PK1 + PK3 (first and third signers)
+        ;   3 => PK2 + PK3 (second and third signers)
+        ;
+        ; For each valid selector, the puzzle outputs:
+        ;   - Two AGG_SIG_ME conditions (one per required signer)
+        ;   - All the spending conditions the signers authorized
+        ;
+        ; The (c item list) operator prepends an item to a list:
+        ;   (c sig1_condition (c sig2_condition conditions))
+        ; produces: (sig1_condition sig2_condition ...conditions...)
+        ;
+        ; Invalid selectors cause an error via (x ...), which aborts
+        ; the spend entirely. The coin remains unspent.
+
+        (if (= selector 1)
+
+            ; --- Selector 1: PK1 + PK2 must sign ---
+            ;
+            ; Both Alice (PK1) and Bob (PK2) must provide signatures
+            ; on conditions_hash. Carol (PK3) is not involved.
+            (c
+                (list AGG_SIG_ME PK1 conditions_hash)
+                (c
+                    (list AGG_SIG_ME PK2 conditions_hash)
+                    conditions
+                )
+            )
+
+            (if (= selector 2)
+
+                ; --- Selector 2: PK1 + PK3 must sign ---
+                ;
+                ; Alice (PK1) and Carol (PK3) must provide signatures.
+                ; Bob (PK2) is not involved.
+                (c
+                    (list AGG_SIG_ME PK1 conditions_hash)
+                    (c
+                        (list AGG_SIG_ME PK3 conditions_hash)
+                        conditions
+                    )
+                )
+
+                (if (= selector 3)
+
+                    ; --- Selector 3: PK2 + PK3 must sign ---
+                    ;
+                    ; Bob (PK2) and Carol (PK3) must provide signatures.
+                    ; Alice (PK1) is not involved.
+                    (c
+                        (list AGG_SIG_ME PK2 conditions_hash)
+                        (c
+                            (list AGG_SIG_ME PK3 conditions_hash)
+                            conditions
+                        )
+                    )
+
+                    ; --- Invalid selector ---
+                    ;
+                    ; If selector is not 1, 2, or 3, raise an error.
+                    ; This is a critical safety check: without it, an
+                    ; invalid selector might skip all AGG_SIG_ME
+                    ; conditions, allowing anyone to spend the coin
+                    ; without any signatures at all.
+                    (x "Invalid selector: must be 1, 2, or 3")
+                )
+            )
+        )
+    )
+)

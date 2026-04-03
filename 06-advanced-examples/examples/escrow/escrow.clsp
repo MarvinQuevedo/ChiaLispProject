@@ -1,0 +1,151 @@
+; =============================================================================
+; ESCROW PUZZLE
+; =============================================================================
+;
+; This puzzle locks funds in escrow between a buyer, a seller, and an arbiter.
+; There are three ways to resolve the escrow:
+;
+;   Mode 0 -- MUTUAL AGREEMENT
+;     Both buyer and seller sign to release funds to the seller.
+;
+;   Mode 1 -- ARBITER DECISION
+;     The arbiter signs and directs funds to a destination of their choice.
+;     This handles disputes where buyer and seller cannot agree.
+;
+;   Mode 2 -- TIMEOUT REFUND
+;     After TIMEOUT_HEIGHT blocks have passed since coin creation, the buyer
+;     can reclaim the funds unilaterally. This prevents funds from being
+;     locked forever if the seller or arbiter become unresponsive.
+;
+; CURRIED PARAMETERS:
+;   BUYER_PUBKEY        - G1 public key of the buyer (depositor)
+;   SELLER_PUBKEY       - G1 public key of the seller (recipient on success)
+;   ARBITER_PUBKEY      - G1 public key of the trusted arbiter
+;   SELLER_PUZZLE_HASH  - Puzzle hash where seller receives funds
+;   BUYER_PUZZLE_HASH   - Puzzle hash where buyer receives refund
+;   TIMEOUT_HEIGHT      - Number of blocks after which buyer can auto-refund
+;
+; SOLUTION:
+;   mode                - 0 = mutual, 1 = arbiter, 2 = timeout
+;   arbiter_dest_ph     - (mode 1 only) puzzle hash the arbiter sends funds to
+;   my_amount           - the amount of this coin (for CREATE_COIN)
+;
+; =============================================================================
+
+(mod
+  (
+    ; --- Curried parameters (baked into the puzzle at creation time) ---
+    BUYER_PUBKEY
+    SELLER_PUBKEY
+    ARBITER_PUBKEY
+    SELLER_PUZZLE_HASH
+    BUYER_PUZZLE_HASH
+    TIMEOUT_HEIGHT
+
+    ; --- Solution parameters (provided at spend time) ---
+    mode
+    arbiter_dest_ph
+    my_amount
+  )
+
+  ; Pull in standard condition codes so we can use readable names
+  (include condition_codes.clib)
+
+  ; =========================================================================
+  ; MODE 0 -- MUTUAL AGREEMENT
+  ; =========================================================================
+  ; Both buyer and seller agree to release funds to the seller.
+  ; We require AGG_SIG_ME from both parties. AGG_SIG_ME binds the signature
+  ; to this specific coin ID, preventing signature reuse on other coins.
+  ;
+  ; The funds are sent to SELLER_PUZZLE_HASH in a single CREATE_COIN.
+  ; We also create a coin announcement so that the seller's wallet coin
+  ; can ASSERT_COIN_ANNOUNCEMENT in the same spend bundle, confirming
+  ; that the escrow was resolved.
+
+  (defun mutual-release (BUYER_PUBKEY SELLER_PUBKEY SELLER_PUZZLE_HASH my_amount)
+    (list
+      ; Require buyer's signature on this specific coin
+      (list AGG_SIG_ME BUYER_PUBKEY (sha256 "release"))
+      ; Require seller's signature on this specific coin
+      (list AGG_SIG_ME SELLER_PUBKEY (sha256 "release"))
+      ; Send all funds to the seller
+      (list CREATE_COIN SELLER_PUZZLE_HASH my_amount)
+      ; Announce the resolution so other coins in the bundle can verify
+      (list CREATE_COIN_ANNOUNCEMENT (sha256 "escrow_released"))
+    )
+  )
+
+  ; =========================================================================
+  ; MODE 1 -- ARBITER DECISION
+  ; =========================================================================
+  ; The arbiter steps in to resolve a dispute. Only the arbiter's signature
+  ; is required. The arbiter provides the destination puzzle hash in the
+  ; solution, giving them flexibility to:
+  ;   - Send all funds to the seller (seller fulfilled obligations)
+  ;   - Send all funds to the buyer (seller failed to deliver)
+  ;   - Send to a split puzzle (partial resolution -- advanced usage)
+  ;
+  ; This flexibility is why arbiter_dest_ph comes from the solution rather
+  ; than being curried in.
+
+  (defun arbiter-decision (ARBITER_PUBKEY arbiter_dest_ph my_amount)
+    (list
+      ; Only the arbiter needs to sign
+      (list AGG_SIG_ME ARBITER_PUBKEY (sha256 arbiter_dest_ph))
+      ; Send funds to wherever the arbiter decides
+      (list CREATE_COIN arbiter_dest_ph my_amount)
+      ; Announce the arbiter's decision
+      (list CREATE_COIN_ANNOUNCEMENT (sha256 "escrow_arbitrated"))
+    )
+  )
+
+  ; =========================================================================
+  ; MODE 2 -- TIMEOUT REFUND
+  ; =========================================================================
+  ; If TIMEOUT_HEIGHT blocks have passed since coin creation and no
+  ; resolution has occurred, the buyer can reclaim their funds.
+  ;
+  ; ASSERT_HEIGHT_RELATIVE ensures that at least TIMEOUT_HEIGHT blocks
+  ; have been added to the blockchain since this coin was created.
+  ; This is a relative timelock, not absolute.
+  ;
+  ; We still require the buyer's signature to prevent anyone from
+  ; triggering the refund (although funds go to BUYER_PUZZLE_HASH anyway,
+  ; requiring the signature is good practice).
+
+  (defun timeout-refund (BUYER_PUBKEY BUYER_PUZZLE_HASH TIMEOUT_HEIGHT my_amount)
+    (list
+      ; Enforce that enough time has passed
+      (list ASSERT_HEIGHT_RELATIVE TIMEOUT_HEIGHT)
+      ; Require buyer's signature
+      (list AGG_SIG_ME BUYER_PUBKEY (sha256 "timeout"))
+      ; Refund to buyer
+      (list CREATE_COIN BUYER_PUZZLE_HASH my_amount)
+      ; Announce the timeout refund
+      (list CREATE_COIN_ANNOUNCEMENT (sha256 "escrow_timeout"))
+    )
+  )
+
+  ; =========================================================================
+  ; MAIN ENTRY POINT -- Route based on mode
+  ; =========================================================================
+
+  (if (= mode 0)
+    ; Mutual agreement -- both buyer and seller sign
+    (mutual-release BUYER_PUBKEY SELLER_PUBKEY SELLER_PUZZLE_HASH my_amount)
+
+    (if (= mode 1)
+      ; Arbiter decision -- arbiter signs and chooses destination
+      (arbiter-decision ARBITER_PUBKEY arbiter_dest_ph my_amount)
+
+      (if (= mode 2)
+        ; Timeout refund -- buyer reclaims after deadline
+        (timeout-refund BUYER_PUBKEY BUYER_PUZZLE_HASH TIMEOUT_HEIGHT my_amount)
+
+        ; Invalid mode -- fail by raising an error
+        (x "Invalid mode")
+      )
+    )
+  )
+)

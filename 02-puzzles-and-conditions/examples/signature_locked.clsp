@@ -1,0 +1,334 @@
+;;; ============================================================
+;;; signature_locked.clsp
+;;; ============================================================
+;;;
+;;; A SIGNATURE-LOCKED COIN (SIMPLIFIED STANDARD TRANSACTION)
+;;;
+;;; This is the fundamental building block of Chia wallets.
+;;; The real "standard transaction" puzzle used by the official
+;;; Chia wallet is very similar to this -- the core idea is
+;;; identical: only the holder of a private key can spend the
+;;; coin, and they can output any conditions they want.
+;;;
+;;; === HOW IT WORKS ===
+;;;
+;;; 1. A public key (PUBLIC_KEY) is curried into the puzzle at
+;;;    creation time. This is the BLS public key of the owner.
+;;;
+;;; 2. To spend the coin, the spender provides a list of
+;;;    conditions in the solution (e.g., CREATE_COIN to send
+;;;    funds somewhere, or any other valid condition).
+;;;
+;;; 3. The puzzle computes the sha256tree hash of the conditions
+;;;    provided in the solution. This creates a unique fingerprint
+;;;    of the exact conditions list.
+;;;
+;;; 4. The puzzle outputs an AGG_SIG_ME condition (opcode 50)
+;;;    that requires a BLS signature proving:
+;;;      - The signer holds the private key for PUBLIC_KEY
+;;;      - The signer explicitly approved these exact conditions
+;;;      - The signature is bound to THIS specific coin (via ME)
+;;;
+;;; 5. If the signature is valid, the conditions are also output,
+;;;    allowing the spender to do whatever they signed for.
+;;;
+;;; === WHY THIS IS SECURE ===
+;;;
+;;; - Only the holder of the private key can produce a valid
+;;;   signature, so only they can spend the coin.
+;;;
+;;; - The signature covers the sha256tree of the conditions,
+;;;   so an attacker cannot modify the conditions without
+;;;   invalidating the signature.
+;;;
+;;; - AGG_SIG_ME (opcode 50) binds the signature to:
+;;;     * The public key
+;;;     * The message (sha256tree of conditions)
+;;;     * The coin ID of the coin being spent
+;;;     * The genesis challenge of the blockchain
+;;;   This means the signature cannot be reused on a different
+;;;   coin or a different blockchain (testnet vs mainnet).
+;;;
+;;; === AGG_SIG_ME vs AGG_SIG_UNSAFE ===
+;;;
+;;; Opcode 50 = AGG_SIG_ME (SAFE)
+;;;   - Signature is bound to: public_key + message + coin_id + genesis_challenge
+;;;   - Cannot be replayed on other coins or other blockchains
+;;;   - ALWAYS prefer this in production puzzles
+;;;
+;;; Opcode 49 = AGG_SIG_UNSAFE
+;;;   - Signature only covers: public_key + message
+;;;   - CAN be replayed on any coin with the same puzzle
+;;;   - Only use when you intentionally need cross-coin signatures
+;;;   - The name "UNSAFE" is a deliberate warning!
+;;;
+;;; === WHAT IS sha256tree? ===
+;;;
+;;; sha256tree is a function that computes a Merkle-like hash
+;;; of a CLVM tree structure. It works like this:
+;;;
+;;;   - For an atom: sha256(0x01 + atom)
+;;;     The 0x01 prefix marks it as a leaf node.
+;;;
+;;;   - For a pair (cons): sha256(0x02 + sha256tree(first) + sha256tree(rest))
+;;;     The 0x02 prefix marks it as an internal node, and we
+;;;     recursively hash both children.
+;;;
+;;; This gives a deterministic hash for any CLVM data structure,
+;;; regardless of how deeply nested it is. Two identical
+;;; structures will always produce the same hash.
+;;;
+;;; Why not just sha256? Because sha256 only works on atoms
+;;; (flat byte strings). Conditions are nested lists (trees),
+;;; so we need a recursive hashing function that can handle
+;;; the cons-cell structure of CLVM.
+;;;
+;;; Example:
+;;;   sha256tree((51 0xABC 1000))
+;;;   = sha256(0x02
+;;;       sha256(0x01 51)
+;;;       sha256(0x02
+;;;         sha256(0x01 0xABC)
+;;;         sha256(0x02
+;;;           sha256(0x01 1000)
+;;;           sha256(0x01 ()))))     ; () is the nil terminator
+;;;
+;;; === ABOUT BLS SIGNATURES ===
+;;;
+;;; Chia uses BLS (Boneh-Lynn-Shacham) signatures, which have
+;;; a special property: they can be AGGREGATED. Multiple
+;;; signatures from different keys can be combined into one
+;;; single signature. This is why the condition is called
+;;; AGG_SIG -- the blockchain aggregates all required signatures
+;;; from all coins in a spend bundle into one signature that
+;;; is verified at once. This saves space on-chain.
+;;;
+;;; === SPEND EXAMPLE ===
+;;;
+;;; Curried puzzle: (curry signature_locked MY_PUBLIC_KEY)
+;;;
+;;; Solution: (((51 0xDESTINATION 500) (51 0xCHANGE 499)))
+;;;
+;;; The spender signs sha256tree of the conditions with their
+;;; private key. The resulting BLS signature is included in the
+;;; spend bundle (not in the solution itself -- signatures live
+;;; at the spend bundle level).
+;;;
+;;; Output conditions:
+;;;   (50 PUBLIC_KEY sha256tree(conditions))  ; AGG_SIG_ME
+;;;   (51 0xDESTINATION 500)                 ; Send 500 mojos
+;;;   (51 0xCHANGE 499)                      ; Change back
+;;;   ; Total output = 999, remaining 1 mojo = fee
+;;;
+;;; ============================================================
+
+(mod (PUBLIC_KEY conditions)
+
+  ;; --------------------------------------------------------
+  ;; DEFINE: sha256tree function (inline)
+  ;;
+  ;; In a real project, you would typically include this from
+  ;; a shared library file using:
+  ;;
+  ;;   (include sha256tree.clib)
+  ;;
+  ;; Here we define it inline so this file is self-contained
+  ;; and you can study exactly how it works. The sha256tree
+  ;; function is one of the most commonly used utility
+  ;; functions in ChiaLisp. It computes a deterministic hash
+  ;; of any CLVM tree (nested list) structure.
+  ;; --------------------------------------------------------
+
+  ;; --------------------------------------------------------
+  ;; sha256tree: Recursively hash a CLVM tree.
+  ;;
+  ;; Parameters:
+  ;;   TREE - Any CLVM value (atom or pair/cons)
+  ;;
+  ;; Returns:
+  ;;   A 32-byte sha256 hash that uniquely identifies the
+  ;;   structure and content of the tree.
+  ;;
+  ;; Algorithm:
+  ;;   - If TREE is a pair (has first and rest):
+  ;;       sha256(0x02 + sha256tree(first) + sha256tree(rest))
+  ;;   - If TREE is an atom (leaf):
+  ;;       sha256(0x01 + atom_value)
+  ;;
+  ;; The 0x01 and 0x02 prefixes prevent "second preimage"
+  ;; attacks -- without them, different tree structures could
+  ;; produce the same hash. For example, the atom "AB" and
+  ;; the pair ("A" . "B") would hash differently because:
+  ;;   atom "AB"        -> sha256(0x01 + "AB")
+  ;;   pair ("A" . "B") -> sha256(0x02 + sha256(0x01+"A") + sha256(0x01+"B"))
+  ;; --------------------------------------------------------
+  (defun sha256tree (TREE)
+    (if (l TREE)
+      ;; TREE is a pair (cons cell):
+      ;; The (l ...) operator returns true if the value is a pair.
+      ;; Hash the 0x02 prefix with recursive hashes of children.
+      ;; (f TREE) = first element, (r TREE) = rest of the list.
+      (sha256 2
+        (sha256tree (f TREE))
+        (sha256tree (r TREE))
+      )
+      ;; TREE is an atom (leaf node):
+      ;; Hash the 0x01 prefix with the atom's value.
+      ;; Atoms include numbers, byte strings, and the empty
+      ;; value () which represents nil / end of list.
+      (sha256 1 TREE)
+    )
+  )
+
+  ;; --------------------------------------------------------
+  ;; PUZZLE LOGIC
+  ;;
+  ;; We need to do two things:
+  ;;   1. Require a signature that approves the conditions
+  ;;   2. Output the conditions so they take effect
+  ;;
+  ;; We use (c X Y) to prepend (cons) the AGG_SIG_ME condition
+  ;; to the front of the conditions list. The result is a
+  ;; single list containing the signature requirement followed
+  ;; by all the spender's requested conditions.
+  ;;
+  ;; The final output looks like:
+  ;;   ((50 PUBLIC_KEY <hash_of_conditions>) cond1 cond2 ...)
+  ;; --------------------------------------------------------
+
+  (c
+
+    ;; --------------------------------------------------------
+    ;; CONDITION: AGG_SIG_ME (opcode 50)
+    ;;
+    ;; Parameters:
+    ;;   - PUBLIC_KEY: The BLS public key (curried in at creation)
+    ;;   - message: sha256tree of the conditions list
+    ;;
+    ;; What AGG_SIG_ME does:
+    ;;   It requires that the spend bundle contains a valid BLS
+    ;;   signature where:
+    ;;     signed_message = message + coin_id + AGG_SIG_ME_ADDITIONAL_DATA
+    ;;
+    ;;   AGG_SIG_ME_ADDITIONAL_DATA is the genesis challenge hash
+    ;;   of the blockchain (different for mainnet vs testnet).
+    ;;   This is automatically appended by the consensus layer.
+    ;;
+    ;; Why we sign sha256tree(conditions):
+    ;;   By signing the hash of the conditions, the private key
+    ;;   holder approves the EXACT set of conditions. Nobody can
+    ;;   add, remove, or modify any condition without invalidating
+    ;;   the signature. This is what makes this pattern secure
+    ;;   even though the spender provides arbitrary conditions.
+    ;;
+    ;; Why AGG_SIG_ME and not AGG_SIG_UNSAFE:
+    ;;   AGG_SIG_ME appends coin_id + genesis_challenge to the
+    ;;   signed message automatically. This means:
+    ;;     - The signature is only valid for THIS specific coin
+    ;;       (replay protection across coins)
+    ;;     - The signature is only valid on THIS blockchain
+    ;;       (replay protection across networks)
+    ;;   With AGG_SIG_UNSAFE, the same signature could be reused
+    ;;   on any coin that has the same puzzle, on any network.
+    ;;
+    ;; Why PUBLIC_KEY must be curried, not in the solution:
+    ;;   If PUBLIC_KEY were provided in the solution, anyone
+    ;;   could supply THEIR OWN public key and sign with THEIR
+    ;;   OWN private key. By currying PUBLIC_KEY into the puzzle,
+    ;;   it becomes part of the puzzle hash. Only the specific
+    ;;   key chosen at creation time can authorize spends.
+    ;; --------------------------------------------------------
+    (list 50 PUBLIC_KEY (sha256tree conditions))
+
+    ;; --------------------------------------------------------
+    ;; The conditions list provided by the spender.
+    ;;
+    ;; These can be ANY valid conditions, for example:
+    ;;   - (51 puzzle_hash amount) to create new coins
+    ;;   - (60 message) to create announcements
+    ;;   - (70 coin_id) to assert coin IDs
+    ;;   - (80 amount) to assert fee amounts
+    ;;   - (82 blocks) to add relative time locks
+    ;;
+    ;; The spender has full flexibility because the signature
+    ;; ensures only the key holder can authorize any set of
+    ;; conditions. This is the power of the signature pattern:
+    ;; maximum flexibility with maximum security.
+    ;;
+    ;; This is called "delegated spending" -- the puzzle does
+    ;; not restrict WHAT can be done, only WHO can authorize it.
+    ;; The owner decides at spend time (not creation time) what
+    ;; conditions to include.
+    ;; --------------------------------------------------------
+    conditions
+  )
+)
+
+;;; ============================================================
+;;; HOW THE REAL STANDARD TRANSACTION DIFFERS
+;;; ============================================================
+;;;
+;;; The actual standard transaction in Chia (puzzle_hash
+;;; starting with "0xeff07...") is more complex. It includes:
+;;;
+;;; 1. A "hidden puzzle" mechanism (taproot-like):
+;;;    The puzzle hash commits to both a public key AND a hidden
+;;;    puzzle. You can spend either by signing conditions OR by
+;;;    revealing the hidden puzzle. This enables pre-committed
+;;;    spending paths without revealing them until used.
+;;;
+;;; 2. Delegated puzzles:
+;;;    Instead of signing the conditions directly, the standard
+;;;    transaction supports "delegated puzzles" -- you can sign
+;;;    a puzzle that GENERATES conditions, adding an extra layer
+;;;    of programmability.
+;;;
+;;; 3. Optimized sha256tree (via operator):
+;;;    The real implementation uses the built-in sha256tree
+;;;    operator from the CLVM for better performance.
+;;;
+;;; But the CORE security model is identical to this file:
+;;; "curried public key + AGG_SIG_ME over approved operations."
+;;;
+;;; ============================================================
+;;; Q&A: COMMON QUESTIONS
+;;; ============================================================
+;;;
+;;; Q: Why do we sign the HASH of conditions, not each condition?
+;;; A: Efficiency. One signature covers everything. And BLS
+;;;    signatures can be aggregated across multiple coin spends,
+;;;    so the entire spend bundle has just one combined signature.
+;;;    Signing each condition separately would require N
+;;;    signatures for N conditions, which is wasteful.
+;;;
+;;; Q: Can the spender choose ANY conditions?
+;;; A: Yes! That is the power of delegated spending. The spender
+;;;    can create any conditions they want (send to any address,
+;;;    add timelocks, make announcements, etc.) as long as they
+;;;    sign them. This is flexible because the puzzle does not
+;;;    restrict WHAT can be done, only WHO can authorize it.
+;;;
+;;; Q: How is this different from the password coin?
+;;; A: The password coin requires knowledge of a secret (the
+;;;    password), which is revealed on-chain when spent. This
+;;;    puzzle requires a cryptographic signature, which proves
+;;;    knowledge of the private key WITHOUT revealing it. The
+;;;    private key is never exposed, even after spending.
+;;;
+;;; Q: What if I lose my private key?
+;;; A: The coin is permanently locked. There is no recovery
+;;;    mechanism in this basic puzzle. More advanced puzzles
+;;;    can include backup keys or social recovery mechanisms.
+;;;
+;;; ============================================================
+;;;
+;;; PATTERN SUMMARY:
+;;;
+;;;   PUBLIC_KEY (curried) --> only key holder can spend
+;;;   sha256tree(conditions) --> signature covers exact conditions
+;;;   AGG_SIG_ME --> binds to this coin + this blockchain
+;;;   conditions output --> spender has full flexibility
+;;;
+;;; This is the most common puzzle pattern in Chia. If you
+;;; understand this file, you understand Chia security.
+;;; ============================================================

@@ -1,0 +1,403 @@
+;;; ============================================================
+;;; time_locked_coin.clsp
+;;; ============================================================
+;;;
+;;; TIME-LOCKED COINS: TWO VERSIONS IN ONE FILE
+;;;
+;;; This file demonstrates two approaches to time-locking coins:
+;;;
+;;;   VERSION 1: RELATIVE time lock
+;;;     "Wait at least N blocks after the coin was created."
+;;;     Uses ASSERT_HEIGHT_RELATIVE (opcode 82).
+;;;
+;;;   VERSION 2: ABSOLUTE time lock
+;;;     "Cannot spend before block height X."
+;;;     Uses ASSERT_HEIGHT_ABSOLUTE (opcode 83).
+;;;
+;;; Both versions also require a BLS signature for
+;;; authentication, because a time lock alone would let
+;;; ANYONE spend the coin after the lock expires.
+;;;
+;;; === WHEN TO USE RELATIVE vs ABSOLUTE ===
+;;;
+;;; RELATIVE time locks are best when you care about DURATION:
+;;;   - "Lock for at least 1 day after deposit"
+;;;   - "Cooling-off period of 100 blocks"
+;;;   - "Minimum staking duration of 4608 blocks"
+;;;   - The lock period is the same regardless of when the
+;;;     coin is created. A coin created at block 1000 and a
+;;;     coin created at block 5000 both wait the same number
+;;;     of blocks.
+;;;
+;;; ABSOLUTE time locks are best when you care about a DATE:
+;;;   - "Unlock on January 1, 2027"
+;;;   - "Available after block 5,000,000"
+;;;   - "Vesting cliff at a specific block height"
+;;;   - The unlock time is fixed regardless of when the coin
+;;;     is created. If the target block has already passed,
+;;;     the coin is immediately spendable.
+;;;
+;;; === TIME LOCK OPCODES REFERENCE ===
+;;;
+;;; There are FOUR time-related condition opcodes:
+;;;
+;;; 80 = ASSERT_SECONDS_RELATIVE
+;;;   "At least N seconds must have passed since coin creation."
+;;;   Uses wall-clock time (less precise, depends on timelord).
+;;;
+;;; 81 = ASSERT_SECONDS_ABSOLUTE
+;;;   "Current timestamp must be >= T."
+;;;   Uses UNIX timestamps (seconds since Jan 1, 1970).
+;;;
+;;; 82 = ASSERT_HEIGHT_RELATIVE
+;;;   "At least N blocks must have been created since this coin."
+;;;   Uses block count (more predictable than seconds).
+;;;
+;;; 83 = ASSERT_HEIGHT_ABSOLUTE
+;;;   "Current block height must be >= H."
+;;;   Uses absolute block number.
+;;;
+;;; RECOMMENDATION: Prefer block-height-based locks (82, 83)
+;;; over seconds-based locks (80, 81). Block heights are
+;;; deterministic and predictable. Timestamps depend on the
+;;; timelord's clock and can have small variations.
+;;;
+;;; === CHIA BLOCK TIMING ===
+;;;
+;;; In Chia, transaction blocks are created approximately
+;;; every 46-52 seconds on average. Useful conversions:
+;;;
+;;;   ~32 blocks   = ~25 minutes
+;;;   ~192 blocks  = ~2.5 hours
+;;;   ~4608 blocks = ~1 day (24 hours)
+;;;   ~32256 blocks = ~1 week
+;;;   ~138240 blocks = ~1 month (30 days)
+;;;
+;;; These are approximations! Do not rely on exact timing.
+;;; Always add a buffer if precision matters.
+;;;
+;;; === USE CASES ===
+;;;
+;;;   - Vesting schedules: tokens unlock over time
+;;;   - Cooling-off periods: prevent impulse spending
+;;;   - Scheduled payments: funds available on a specific date
+;;;   - Dispute windows: allow time to contest a transaction
+;;;   - Staking: lock funds for a minimum period
+;;;   - DeFi protocols: time-delayed withdrawals for security
+;;;
+;;; ============================================================
+
+
+;;; ============================================================
+;;; VERSION 1: RELATIVE TIME LOCK (by block height)
+;;; ============================================================
+;;;
+;;; This coin cannot be spent until at least LOCK_BLOCKS blocks
+;;; have been created after the coin itself was created.
+;;;
+;;; Curried parameters:
+;;;   PUBLIC_KEY  - BLS public key of the authorized spender
+;;;   LOCK_BLOCKS - Minimum number of blocks to wait
+;;;
+;;; Solution parameters:
+;;;   conditions - The conditions to execute when spending
+;;;
+;;; Example:
+;;;   To lock a coin for approximately 1 day:
+;;;     (curry time_locked_coin MY_PUBLIC_KEY 4608)
+;;;
+;;;   To lock for approximately 1 week:
+;;;     (curry time_locked_coin MY_PUBLIC_KEY 32256)
+;;;
+;;; What happens if you try to spend too early:
+;;;   The ASSERT_HEIGHT_RELATIVE condition fails, the blockchain
+;;;   rejects the spend, and the coin remains locked. The spender
+;;;   must wait and try again after enough blocks have passed.
+;;; ============================================================
+
+(mod (PUBLIC_KEY LOCK_BLOCKS conditions)
+
+  ;; --------------------------------------------------------
+  ;; sha256tree: Recursively hash a CLVM tree.
+  ;;
+  ;; We need this to compute the hash of the conditions list
+  ;; for the AGG_SIG_ME signature verification. See
+  ;; signature_locked.clsp for a detailed explanation.
+  ;;
+  ;; In a real project, you would use:
+  ;;   (include sha256tree.clib)
+  ;; --------------------------------------------------------
+  (defun sha256tree (TREE)
+    (if (l TREE)
+      (sha256 2 (sha256tree (f TREE)) (sha256tree (r TREE)))
+      (sha256 1 TREE)
+    )
+  )
+
+  ;; --------------------------------------------------------
+  ;; PUBLIC_KEY   : BLS public key for authorization (curried)
+  ;; LOCK_BLOCKS  : Minimum blocks to wait after creation (curried)
+  ;; conditions   : The spend conditions (from solution)
+  ;;
+  ;; Both PUBLIC_KEY and LOCK_BLOCKS are curried in at creation
+  ;; time. This is critical:
+  ;;
+  ;; - If PUBLIC_KEY were in the solution, anyone could
+  ;;   substitute their own key and spend the coin.
+  ;;
+  ;; - If LOCK_BLOCKS were in the solution, the spender could
+  ;;   set it to 0 and bypass the time lock entirely!
+  ;;
+  ;; By currying these values, they become part of the puzzle
+  ;; hash and cannot be changed after coin creation.
+  ;; --------------------------------------------------------
+
+  ;; Build the output conditions list using nested (c ...) calls.
+  ;; Each (c item rest) prepends an item to the rest of the list.
+  (c
+    ;; --------------------------------------------------------
+    ;; CONDITION 1: ASSERT_HEIGHT_RELATIVE (opcode 82)
+    ;;
+    ;; "This spend is only valid if at least LOCK_BLOCKS blocks
+    ;;  have been created since this coin was confirmed."
+    ;;
+    ;; How it works:
+    ;;   - When this coin was created (confirmed in a block),
+    ;;     the blockchain records its "birth height."
+    ;;   - When someone tries to spend it, the blockchain checks:
+    ;;       current_height - birth_height >= LOCK_BLOCKS
+    ;;   - If the check fails, the spend is rejected.
+    ;;
+    ;; Why RELATIVE and not ABSOLUTE:
+    ;;   Relative locks are ideal when you want a consistent
+    ;;   waiting period regardless of when the coin is created.
+    ;;   For example, a staking contract that always requires
+    ;;   a 7-day lock, no matter when the user stakes.
+    ;;
+    ;; Important: the lock starts when the coin is CONFIRMED
+    ;; in a block, not when the transaction is broadcast. If
+    ;; the transaction sits in the mempool for a while, that
+    ;; time does NOT count toward the lock.
+    ;; --------------------------------------------------------
+    (list 82 LOCK_BLOCKS)
+
+    (c
+      ;; --------------------------------------------------------
+      ;; CONDITION 2: AGG_SIG_ME (opcode 50)
+      ;;
+      ;; Require a BLS signature from the owner. Without this,
+      ;; anyone could spend the coin after the time lock expires.
+      ;; The signature covers the hash of the conditions, so the
+      ;; owner must approve the exact spend operations.
+      ;;
+      ;; This is the same pattern used in signature_locked.clsp.
+      ;; The time lock adds a WHEN restriction; the signature
+      ;; adds a WHO restriction. Together they say:
+      ;; "Only this person can spend, and only after N blocks."
+      ;; --------------------------------------------------------
+      (list 50 PUBLIC_KEY (sha256tree conditions))
+
+      ;; --------------------------------------------------------
+      ;; CONDITION 3+: The spender's requested conditions.
+      ;;
+      ;; These typically include CREATE_COIN to send funds to a
+      ;; new puzzle hash. The spender has full flexibility here,
+      ;; just like in signature_locked.clsp, because the
+      ;; signature proves they authorized these exact conditions.
+      ;; --------------------------------------------------------
+      conditions
+    )
+  )
+)
+
+
+;;; ============================================================
+;;; VERSION 2: ABSOLUTE TIME LOCK (by block height)
+;;; ============================================================
+;;;
+;;; This coin cannot be spent before a specific block height.
+;;; Unlike the relative lock above, this uses an ABSOLUTE
+;;; block number. The coin is locked until the blockchain
+;;; reaches that height, regardless of when the coin was created.
+;;;
+;;; Curried parameters:
+;;;   PUBLIC_KEY     - BLS public key of the authorized spender
+;;;   UNLOCK_HEIGHT  - The block height at which spending is allowed
+;;;
+;;; Solution parameters:
+;;;   conditions - The conditions to execute when spending
+;;;
+;;; Example:
+;;;   To lock until block 5,000,000:
+;;;     (curry absolute_time_locked MY_PUBLIC_KEY 5000000)
+;;;
+;;; Key difference from Version 1:
+;;;   - Version 1 (relative): "Wait 4608 blocks after creation"
+;;;     -> A coin created at block 1000 unlocks at block 5608
+;;;     -> A coin created at block 9000 unlocks at block 13608
+;;;
+;;;   - Version 2 (absolute): "Wait until block 5000"
+;;;     -> A coin created at block 1000 unlocks at block 5000
+;;;     -> A coin created at block 9000 is IMMEDIATELY spendable
+;;;        (because block 9000 > 5000)
+;;;
+;;; This version is commented out so the file compiles as
+;;; Version 1. To use Version 2 instead, comment out Version 1
+;;; and uncomment this block.
+;;; ============================================================
+
+; (mod (PUBLIC_KEY UNLOCK_HEIGHT conditions)
+;
+;   ;; sha256tree for computing the conditions hash for signatures
+;   (defun sha256tree (TREE)
+;     (if (l TREE)
+;       (sha256 2 (sha256tree (f TREE)) (sha256tree (r TREE)))
+;       (sha256 1 TREE)
+;     )
+;   )
+;
+;   ;; PUBLIC_KEY     : BLS public key for authorization (curried)
+;   ;; UNLOCK_HEIGHT  : Absolute block height to unlock (curried)
+;   ;; conditions     : The spend conditions (from solution)
+;
+;   (c
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 1: ASSERT_HEIGHT_ABSOLUTE (opcode 83)
+;     ;;
+;     ;; "This spend is only valid if the current block height
+;     ;;  is greater than or equal to UNLOCK_HEIGHT."
+;     ;;
+;     ;; How it works:
+;     ;;   - The blockchain checks: current_height >= UNLOCK_HEIGHT
+;     ;;   - If the current block is below UNLOCK_HEIGHT, the
+;     ;;     spend is rejected.
+;     ;;   - Once the blockchain passes UNLOCK_HEIGHT, the coin
+;     ;;     can be spent at any time (subject to the signature).
+;     ;;
+;     ;; Why ABSOLUTE and not RELATIVE:
+;     ;;   Absolute locks are ideal when you want all coins to
+;     ;;   unlock at the same time, regardless of when they were
+;     ;;   created. For example:
+;     ;;     - A token sale where all tokens vest on the same date
+;     ;;     - A governance vote that opens at a specific block
+;     ;;     - Coordinated protocol upgrades
+;     ;;
+;     ;; Edge case: if UNLOCK_HEIGHT is in the past (less than
+;     ;; the current block height), the assertion passes
+;     ;; immediately and the coin is spendable right away.
+;     ;; --------------------------------------------------------
+;     (list 83 UNLOCK_HEIGHT)
+;
+;     (c
+;       ;; CONDITION 2: AGG_SIG_ME -- require owner's signature
+;       (list 50 PUBLIC_KEY (sha256tree conditions))
+;
+;       ;; CONDITION 3+: The spender's requested conditions
+;       conditions
+;     )
+;   )
+; )
+
+
+;;; ============================================================
+;;; BONUS: COMBINED RELATIVE + ABSOLUTE LOCK
+;;; ============================================================
+;;;
+;;; You can combine BOTH lock types for maximum control.
+;;; This version requires:
+;;;   1. At least MIN_BLOCKS blocks since coin creation (relative)
+;;;   2. Current block height >= UNLOCK_HEIGHT (absolute)
+;;;   3. A valid signature from the owner
+;;;
+;;; Use case example: a staking contract where:
+;;;   - You must stake for at least 7 days (relative: 32256 blocks)
+;;;   - AND the unstaking period does not begin until a specific
+;;;     protocol launch date (absolute: block 5000000)
+;;;
+;;; This means even if you staked 7 days ago, you still cannot
+;;; unstake until the protocol launch block. And even after the
+;;; launch block, new stakers must still wait their full 7 days.
+;;; ============================================================
+
+; (mod (PUBLIC_KEY MIN_BLOCKS UNLOCK_HEIGHT conditions)
+;
+;   (defun sha256tree (TREE)
+;     (if (l TREE)
+;       (sha256 2 (sha256tree (f TREE)) (sha256tree (r TREE)))
+;       (sha256 1 TREE)
+;     )
+;   )
+;
+;   (c
+;     ;; Must wait at least MIN_BLOCKS since coin creation
+;     ;; ASSERT_HEIGHT_RELATIVE (opcode 82)
+;     (list 82 MIN_BLOCKS)
+;
+;     (c
+;       ;; Must also be past the absolute unlock height
+;       ;; ASSERT_HEIGHT_ABSOLUTE (opcode 83)
+;       (list 83 UNLOCK_HEIGHT)
+;
+;       (c
+;         ;; Require owner signature over the conditions
+;         ;; AGG_SIG_ME (opcode 50)
+;         (list 50 PUBLIC_KEY (sha256tree conditions))
+;
+;         ;; Include the spender's conditions
+;         conditions
+;       )
+;     )
+;   )
+; )
+
+
+;;; ============================================================
+;;; DETAILED NOTES
+;;; ============================================================
+;;;
+;;; Q: Why use block height instead of seconds?
+;;; A: Block heights are more predictable. Timestamps can vary
+;;;    because they depend on the timelord's clock. Block heights
+;;;    are deterministic: block N always comes after block N-1.
+;;;    The VDF (Verifiable Delay Function) ensures blocks cannot
+;;;    be created faster than the protocol allows, so block
+;;;    heights provide a reliable minimum elapsed time.
+;;;
+;;; Q: What happens if someone tries to spend before the lock?
+;;; A: The ASSERT condition fails, and the entire spend is
+;;;    rejected by the network. The coin remains unspent and
+;;;    the spender loses nothing (except the cost of assembling
+;;;    the transaction). They can try again later.
+;;;
+;;; Q: Can the time lock be bypassed?
+;;; A: No. Time locks are enforced by the consensus layer (all
+;;;    full nodes). Even if you control 100% of the farming
+;;;    power, you cannot make blocks appear faster than the VDF
+;;;    allows. The Verifiable Delay Function guarantees a
+;;;    minimum real-world time between blocks.
+;;;
+;;; Q: Why curry in LOCK_BLOCKS instead of putting it in solution?
+;;; A: If the lock duration were in the solution, the spender
+;;;    could set it to 0 and bypass the lock entirely! By
+;;;    currying it in, the lock becomes part of the puzzle hash
+;;;    and cannot be changed after the coin is created.
+;;;
+;;; Q: Can I combine time locks with other puzzles?
+;;; A: Absolutely. Time locks can be added to any puzzle by
+;;;    including the ASSERT condition in the output. You can
+;;;    combine them with passwords, multi-sig, announcements,
+;;;    or any other condition type. The conditions system is
+;;;    composable -- you simply include more conditions.
+;;;
+;;; Q: What if I set LOCK_BLOCKS to 0?
+;;; A: The assertion trivially passes (0 blocks have always
+;;;    passed), so the coin behaves as if there is no time lock.
+;;;    This is not useful in practice but is not harmful.
+;;;
+;;; Q: Can I update the lock duration after creating the coin?
+;;; A: No. Once the coin is created, its puzzle hash is fixed.
+;;;    To change the lock, you would need to spend the coin
+;;;    (after the current lock expires) and create a new coin
+;;;    with a different lock duration curried in.
+;;;
+;;; ============================================================

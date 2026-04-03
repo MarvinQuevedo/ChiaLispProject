@@ -1,0 +1,111 @@
+;;; simple_curry.clsp
+;;;
+;;; A simple greeting puzzle that demonstrates currying.
+;;;
+;;; This puzzle takes a NAME (curried at compile time) and a greeting
+;;; message (provided at spend time in the solution). It outputs a
+;;; single CREATE_REMARK condition containing the combined greeting.
+;;;
+;;; CURRIED PARAMETERS:
+;;;   NAME          - An atom (string) representing who we are greeting.
+;;;                   This is baked into the puzzle at compile time.
+;;;                   Different names produce different puzzle hashes.
+;;;
+;;; SOLUTION PARAMETERS:
+;;;   greeting_msg  - An atom (string) representing the greeting text.
+;;;                   Provided at spend time.
+;;;
+;;; =====================================================================
+;;; HOW TO USE:
+;;; =====================================================================
+;;;
+;;; 1. Compile the puzzle:
+;;;
+;;;    $ run simple_curry.clsp
+;;;    => (c (q . 1) (c (c (q . 2) (c 5 ())) (q . ())))
+;;;
+;;;    This is the CLVM bytecode for the uncurried version.
+;;;    It expects two arguments: NAME and greeting_msg.
+;;;
+;;; 2. Curry with a name (e.g., "Alice"):
+;;;
+;;;    $ cdv clsp curry simple_curry.clsp -a "Alice"
+;;;
+;;;    This produces a NEW puzzle where NAME="Alice" is permanently
+;;;    embedded. The puzzle hash of this result is DIFFERENT from the
+;;;    uncurried version and from any other curried version.
+;;;
+;;;    Under the hood, the curried output looks like:
+;;;
+;;;    (a (q . <original_compiled_code>)
+;;;       (c (q . "Alice") 1))
+;;;
+;;;    The (c (q . "Alice") 1) part means: "prepend 'Alice' to
+;;;    whatever solution is provided at spend time."
+;;;
+;;; 3. Run the curried puzzle with a greeting:
+;;;
+;;;    $ brun <curried_hex> '("Hello")'
+;;;    => ((1 "Alice" "Hello"))
+;;;
+;;;    The curried puzzle only needs ONE argument (greeting_msg).
+;;;    NAME is already baked in as "Alice".
+;;;
+;;; 4. Try currying with a different name:
+;;;
+;;;    $ cdv clsp curry simple_curry.clsp -a "Bob"
+;;;
+;;;    This produces ANOTHER new puzzle with a DIFFERENT hash.
+;;;    Same template, different identity.
+;;;
+;;; 5. Compare the puzzle hashes:
+;;;
+;;;    $ cdv clsp curry simple_curry.clsp -a "Alice" --treehash
+;;;    => 0x1a2b...   (some hash)
+;;;
+;;;    $ cdv clsp curry simple_curry.clsp -a "Bob" --treehash
+;;;    => 0x3c4d...   (a DIFFERENT hash)
+;;;
+;;;    This proves that currying changes the puzzle hash. On the
+;;;    blockchain, these would be two completely different coin types.
+;;;
+;;; 6. Run the uncurried version (both args in solution):
+;;;
+;;;    $ run simple_curry.clsp
+;;;    $ brun <uncurried_hex> '("Charlie" "Goodbye")'
+;;;    => ((1 "Charlie" "Goodbye"))
+;;;
+;;;    Without currying, both NAME and greeting_msg must be in
+;;;    the solution. The result is the same, but the puzzle hash
+;;;    is different from any curried version.
+;;;
+
+; Condition code for REMARK (opcode 1)
+; REMARK conditions are ignored by the blockchain but are useful for
+; debugging and for demonstrating puzzle output without affecting
+; blockchain state. In a real puzzle, you would use CREATE_COIN (51),
+; AGG_SIG_ME (50), etc.
+(defconstant REMARK 1)
+
+(mod (NAME greeting_msg)
+
+    ; Output a single REMARK condition with the name and greeting.
+    ;
+    ; The output is a list containing one condition:
+    ;   ((1 NAME greeting_msg))
+    ;
+    ; For example, with NAME="Alice" and greeting_msg="Hello":
+    ;   ((1 "Alice" "Hello"))
+    ;
+    ; The (list (list ...)) pattern creates:
+    ;   - Inner list: one condition (REMARK NAME greeting_msg)
+    ;   - Outer list: the list of all conditions (just one here)
+    ;
+    ; In a real puzzle, you would return conditions like:
+    ;   ((51 0xrecipient_hash 1000)   ; CREATE_COIN
+    ;    (50 0xpubkey message))         ; AGG_SIG_ME
+
+    (list
+        (list REMARK NAME greeting_msg)
+    )
+)

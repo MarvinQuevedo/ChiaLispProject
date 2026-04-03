@@ -1,0 +1,102 @@
+; ============================================
+; list_operations.clsp — List Manipulation
+; ============================================
+;
+; ChiaLisp has no arrays or vectors — only cons pairs forming lists.
+; This program demonstrates how to work with lists using recursion.
+;
+; COMPILE:  run list_operations.clsp
+; RUN:      brun "$(run list_operations.clsp)" "((10 20 30 40 50))"
+; Note: the list must be wrapped in an outer list (it's one argument)
+
+(mod (my_list)
+
+  ; ---- LENGTH ----
+  ; Count elements in a list using recursion.
+  ; Base case: empty list () has length 0
+  ; Recursive: 1 + length(rest)
+  (defun length (lst)
+    (if lst                         ; if lst is not empty (not nil)
+      (+ 1 (length (r lst)))       ; 1 + length of rest
+      0                             ; empty list → 0
+    )
+  )
+
+  ; ---- SUM ----
+  ; Add all elements in a list.
+  (defun sum (lst)
+    (if lst
+      (+ (f lst) (sum (r lst)))    ; first + sum(rest)
+      0                             ; empty → 0
+    )
+  )
+
+  ; ---- REVERSE ----
+  ; Reverse a list using an accumulator (tail-recursive pattern).
+  ; reverse((1 2 3)) → (3 2 1)
+  (defun reverse-inner (lst acc)
+    (if lst
+      (reverse-inner
+        (r lst)                     ; process the rest
+        (c (f lst) acc)             ; prepend first to accumulator
+      )
+      acc                           ; done — return accumulator
+    )
+  )
+
+  (defun reverse (lst)
+    (reverse-inner lst ())          ; start with empty accumulator
+  )
+
+  ; ---- MAP (double each element) ----
+  ; There's no built-in map, so we build our own.
+  ; This one doubles every element in the list.
+  (defun double-all (lst)
+    (if lst
+      (c                            ; cons (build a new list)
+        (* 2 (f lst))              ; double the first element
+        (double-all (r lst))       ; recurse on the rest
+      )
+      ()                            ; empty list → empty list
+    )
+  )
+
+  ; ---- FILTER (keep elements > threshold) ----
+  ; Keep only elements greater than a threshold.
+  (defun filter-greater (lst threshold)
+    (if lst
+      (if (> (f lst) threshold)
+        (c (f lst) (filter-greater (r lst) threshold))  ; keep it
+        (filter-greater (r lst) threshold)               ; skip it
+      )
+      ()
+    )
+  )
+
+  ; ---- Return results ----
+  ; Return a list of: (length, sum, reversed, doubled, filtered>25)
+  (list
+    (length my_list)
+    (sum my_list)
+    (reverse my_list)
+    (double-all my_list)
+    (filter-greater my_list 25)
+  )
+)
+
+; ============================================
+; EXPECTED OUTPUT for input ((10 20 30 40 50)):
+;
+; (5                         ← length: 5 elements
+;  150                       ← sum: 10+20+30+40+50
+;  (50 40 30 20 10)          ← reversed
+;  (20 40 60 80 100)         ← all doubled
+;  (30 40 50))               ← elements > 25
+;
+; KEY PATTERNS:
+; - Recursion replaces loops
+; - (f lst) = first element, (r lst) = rest of list
+; - (c element list) = prepend element to list
+; - () is the empty list (base case for recursion)
+; - Accumulator pattern (reverse) for tail-call optimization
+; ============================================

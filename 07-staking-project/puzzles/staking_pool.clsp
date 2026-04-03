@@ -1,0 +1,359 @@
+;;; ============================================================================
+;;; staking_pool.clsp - CAT Staking Pool Puzzle
+;;; ============================================================================
+;;;
+;;; This is the main staking pool puzzle for the CAT Staking System (Chapter 7).
+;;;
+;;; OVERVIEW
+;;; --------
+;;; This puzzle controls a pool of CAT tokens distributed as staking rewards.
+;;; It supports three actions:
+;;;
+;;;   Action 0 (STAKE):      A user locks tokens and receives a reward allocation
+;;;   Action 1 (ADD):        The operator deposits more reward tokens
+;;;   Action 2 (WITHDRAW):   The operator removes reward tokens (with timelock)
+;;;
+;;; The pool coin recreates itself with an updated amount after each action,
+;;; forming a chain of state transitions. The puzzle hash changes when
+;;; TOTAL_REWARDS changes (since it is curried), so the driver must compute
+;;; the new puzzle hash for each state transition.
+;;;
+;;; CURRIED PARAMETERS
+;;; ------------------
+;;; These are baked into the puzzle at deployment time using (curry ...):
+;;;
+;;;   POOL_AUTH_KEY   - (G1Element, 48 bytes) BLS public key of the pool
+;;;                     operator. Required for ALL actions (stake approval,
+;;;                     add, withdraw).
+;;;
+;;;   CAT_TAIL_HASH   - (bytes32) The asset ID (TAIL hash) of the CAT token
+;;;                     that this pool accepts. Curried in for identification
+;;;                     and announcement binding.
+;;;
+;;;   STAKING_TIERS   - (list of pairs) Each element is: (lock_blocks apy_bps)
+;;;                     - lock_blocks: Number of blocks the stake is locked
+;;;                     - apy_bps:     APY in basis points (500 = 5%, 1200 = 12%)
+;;;                     Example: ((138240 500) (414720 1200) (829440 2000) (1681920 3500))
+;;;
+;;;   TOTAL_REWARDS   - (int) Total reward tokens currently available in the pool.
+;;;                     Decreases with each stake, increases when operator adds.
+;;;
+;;; REWARD FORMULA
+;;; --------------
+;;; reward = (stake_amount * apy_bps * lock_blocks) / (BLOCKS_PER_YEAR * 10000)
+;;;
+;;; Examples:
+;;;   stake=1000, tier=(138240, 500):  reward = 1000*500*138240 / (1681920*10000) = 4
+;;;   stake=1000, tier=(414720, 1200): reward = 1000*1200*414720 / (1681920*10000) = 29
+;;;   stake=1000, tier=(1681920, 3500): reward = 1000*3500*1681920 / (1681920*10000) = 350
+;;; ============================================================================
+
+(mod
+  (
+    ; --- Curried parameters (baked in at deployment) ---
+    POOL_AUTH_KEY       ; BLS public key of pool operator
+    CAT_TAIL_HASH       ; Asset ID of the CAT token
+    STAKING_TIERS       ; List of (lock_blocks apy_bps) pairs
+    TOTAL_REWARDS       ; Total reward tokens remaining in pool
+
+    ; --- Solution parameters (provided at spend time) ---
+    action_type         ; 0 = stake, 1 = add rewards, 2 = withdraw
+    arg1                ; Meaning depends on action_type (see below)
+    arg2                ; Meaning depends on action_type
+    arg3                ; Meaning depends on action_type
+    my_coin_id          ; This coin's ID (for ASSERT_MY_COIN_ID)
+    my_amount           ; This coin's amount (for ASSERT_MY_AMOUNT)
+    my_puzzle_hash      ; This coin's puzzle hash (to recreate itself)
+    extra_arg           ; Additional argument depending on action
+  )
+
+  ; ========================================================================
+  ; DEFINITIONS
+  ; ========================================================================
+
+  ; Condition opcodes
+  (defconstant CREATE_COIN 51)
+  (defconstant CREATE_COIN_ANNOUNCEMENT 60)
+  (defconstant ASSERT_COIN_ANNOUNCEMENT 61)
+  (defconstant ASSERT_MY_COIN_ID 70)
+  (defconstant ASSERT_MY_AMOUNT 73)
+  (defconstant AGG_SIG_ME 50)
+  (defconstant ASSERT_HEIGHT_RELATIVE 83)
+
+  ; Blocks per year: 4608 blocks/day * 365 days = 1,681,920
+  (defconstant BLOCKS_PER_YEAR 1681920)
+
+  ; Basis points denominator: 10,000 bps = 100%
+  (defconstant BPS_DENOMINATOR 10000)
+
+  ; Timelock for operator withdrawal: 30 days in blocks
+  ; Prevents instant rug pulls by the operator
+  (defconstant WITHDRAW_TIMELOCK 138240)
+
+  ; ========================================================================
+  ; HELPER: Get the Nth element from a list
+  ; ========================================================================
+  ; Retrieves a staking tier from STAKING_TIERS by index.
+  ; Example: (get_tier ((138240 500) (414720 1200)) 1) => (414720 1200)
+
+  (defun get_tier (tiers index)
+    (if (= index 0)
+      (f tiers)
+      (get_tier (r tiers) (- index 1))
+    )
+  )
+
+  ; ========================================================================
+  ; HELPER: Calculate staking reward
+  ; ========================================================================
+  ; reward = (stake_amount * apy_bps * lock_blocks) / (BLOCKS_PER_YEAR * BPS_DENOMINATOR)
+  ;
+  ; Integer division truncates (rounds down), so the pool never over-commits.
+  ;
+  ; Example: stake=1000, apy_bps=1200, lock_blocks=414720
+  ;   = (1000 * 1200 * 414720) / (1681920 * 10000)
+  ;   = 497,664,000,000 / 16,819,200,000
+  ;   = 29
+
+  (defun calculate_reward (stake_amount apy_bps lock_blocks)
+    (/
+      (* stake_amount (* apy_bps lock_blocks))
+      (* BLOCKS_PER_YEAR BPS_DENOMINATOR)
+    )
+  )
+
+  ; ========================================================================
+  ; MAIN LOGIC: Dispatch on action_type
+  ; ========================================================================
+
+  (if (= action_type 0)
+
+    ; ==================================================================
+    ; ACTION 0: STAKE
+    ; ==================================================================
+    ; A user stakes their CAT tokens in exchange for a future reward.
+    ;
+    ; Solution fields:
+    ;   arg1 = staker_pubkey            (G1Element)
+    ;   arg2 = stake_amount             (int - CAT mojos to stake)
+    ;   arg3 = tier_index               (int - 0-based index into STAKING_TIERS)
+    ;   extra_arg = stake_lock_puzzle_hash (bytes32 - precomputed by driver)
+    ;
+    ; What happens:
+    ;   1. Look up the selected tier (lock_blocks, apy_bps)
+    ;   2. Calculate the reward
+    ;   3. Verify pool has enough rewards (reward <= TOTAL_REWARDS)
+    ;   4. Create new pool coin with (my_amount - reward)
+    ;   5. Create stake lock coin with (stake_amount + reward)
+    ;   6. Create/assert announcements for atomic binding
+    ;   7. Require operator signature
+    ;
+    ; The stake_lock_puzzle_hash is precomputed by the driver because
+    ; computing a tree hash inside CLVM is expensive. The driver curries
+    ; stake_lock.clsp with (staker_pubkey, stake_amount, reward,
+    ; unlock_height, cat_tail_hash) and provides the resulting hash.
+    ; ==================================================================
+    (let
+      (
+        ; Bind meaningful names to solution arguments
+        (staker_pubkey arg1)
+        (stake_amount arg2)
+        (tier_index arg3)
+        (stake_lock_puzzle_hash extra_arg)
+
+        ; Look up the selected tier: (lock_blocks apy_bps)
+        (selected_tier (get_tier STAKING_TIERS tier_index))
+
+        ; Extract tier components
+        (lock_blocks (f selected_tier))
+        (apy_bps (f (r selected_tier)))
+      )
+
+      (let
+        (
+          ; Calculate the reward for this stake
+          (reward (calculate_reward stake_amount apy_bps lock_blocks))
+
+          ; Total amount going to the lock coin
+          (lock_amount (+ stake_amount reward))
+
+          ; New pool amount after allocating the reward
+          (new_pool_amount (- my_amount reward))
+
+          ; Announcement message: binds stake parameters to this pool spend
+          (announcement_msg (sha256 staker_pubkey stake_amount tier_index))
+        )
+
+        ; SAFETY CHECK: Pool must have enough tokens for the reward
+        (if (> reward my_amount)
+          (x "Pool has insufficient rewards for this stake")
+
+          ; PRODUCE CONDITIONS
+          (list
+            ; 1. Verify coin identity (anti-replay)
+            (list ASSERT_MY_COIN_ID my_coin_id)
+
+            ; 2. Verify coin amount (ensures arithmetic correctness)
+            (list ASSERT_MY_AMOUNT my_amount)
+
+            ; 3. Pool operator must authorize this stake
+            ;    The signed message includes staker + amount + tier
+            ;    to prevent parameter tampering
+            (list AGG_SIG_ME POOL_AUTH_KEY
+              (sha256 staker_pubkey stake_amount tier_index))
+
+            ; 4. Recreate pool coin with reduced amount
+            ;    The driver provides my_puzzle_hash which is the puzzle
+            ;    re-curried with (TOTAL_REWARDS - reward)
+            (list CREATE_COIN my_puzzle_hash new_pool_amount)
+
+            ; 5. Create the stake lock coin
+            ;    Amount = stake_amount + reward
+            ;    Puzzle hash precomputed by driver
+            (list CREATE_COIN stake_lock_puzzle_hash lock_amount)
+
+            ; 6. Create announcement for atomic binding
+            ;    The staker's coin must assert this announcement
+            (list CREATE_COIN_ANNOUNCEMENT announcement_msg)
+
+            ; 7. Assert staker's coin announcement
+            ;    The staker's coin must create: sha256("staking" + my_coin_id)
+            ;    We assert: sha256(staker_coin_id + sha256("staking" + my_coin_id))
+            ;    This ensures the staker's coin was actually spent
+            ;    NOTE: In this educational version, we simplify by omitting
+            ;    this assertion. In production, include it for full binding.
+          )
+        )
+      )
+    )
+
+  (if (= action_type 1)
+
+    ; ==================================================================
+    ; ACTION 1: ADD REWARDS
+    ; ==================================================================
+    ; The pool operator deposits additional reward tokens.
+    ;
+    ; Solution fields:
+    ;   arg1 = additional_amount  (int - CAT mojos to add)
+    ;   arg2 = (unused, pass 0)
+    ;   arg3 = (unused, pass 0)
+    ;
+    ; The additional tokens come from a separate coin in the same
+    ; spend bundle. The operator must fund the bundle appropriately.
+    ; ==================================================================
+    (let
+      (
+        (additional_amount arg1)
+        (new_pool_amount (+ my_amount additional_amount))
+      )
+
+      (list
+        ; 1. Assert coin identity
+        (list ASSERT_MY_COIN_ID my_coin_id)
+
+        ; 2. Assert coin amount
+        (list ASSERT_MY_AMOUNT my_amount)
+
+        ; 3. Require operator signature
+        ;    Message includes the amount to prevent confusion
+        (list AGG_SIG_ME POOL_AUTH_KEY (sha256 "add_rewards" additional_amount))
+
+        ; 4. Create new pool coin with increased amount
+        ;    my_puzzle_hash is re-curried with (TOTAL_REWARDS + additional_amount)
+        (list CREATE_COIN my_puzzle_hash new_pool_amount)
+
+        ; 5. Announce the addition for tracking
+        (list CREATE_COIN_ANNOUNCEMENT (sha256 "rewards_added" additional_amount))
+      )
+    )
+
+  (if (= action_type 2)
+
+    ; ==================================================================
+    ; ACTION 2: WITHDRAW REWARDS
+    ; ==================================================================
+    ; The pool operator withdraws unclaimed reward tokens.
+    ;
+    ; IMPORTANT: A 30-day timelock (ASSERT_HEIGHT_RELATIVE) is enforced.
+    ; This prevents the operator from instantly draining the pool.
+    ; Stakers have at least 30 days to notice and react.
+    ;
+    ; Solution fields:
+    ;   arg1 = withdraw_amount         (int - CAT mojos to withdraw)
+    ;   arg2 = withdrawal_puzzle_hash  (bytes32 - where to send tokens)
+    ;   arg3 = (unused, pass 0)
+    ; ==================================================================
+    (let
+      (
+        (withdraw_amount arg1)
+        (withdrawal_puzzle_hash arg2)
+        (new_pool_amount (- my_amount withdraw_amount))
+      )
+
+      ; Safety check: cannot withdraw more than pool holds
+      (if (> withdraw_amount my_amount)
+        (x "Withdraw amount exceeds pool balance")
+
+        (list
+          ; 1. Assert coin identity
+          (list ASSERT_MY_COIN_ID my_coin_id)
+
+          ; 2. Assert coin amount
+          (list ASSERT_MY_AMOUNT my_amount)
+
+          ; 3. Enforce 30-day timelock
+          ;    The coin must be at least WITHDRAW_TIMELOCK blocks old
+          (list ASSERT_HEIGHT_RELATIVE WITHDRAW_TIMELOCK)
+
+          ; 4. Require operator signature
+          (list AGG_SIG_ME POOL_AUTH_KEY (sha256 "withdraw" withdraw_amount))
+
+          ; 5. Recreate pool coin with reduced amount
+          (list CREATE_COIN my_puzzle_hash new_pool_amount)
+
+          ; 6. Create withdrawal coin to operator's address
+          (list CREATE_COIN withdrawal_puzzle_hash withdraw_amount)
+
+          ; 7. Announce the withdrawal
+          (list CREATE_COIN_ANNOUNCEMENT (sha256 "rewards_withdrawn" withdraw_amount))
+        )
+      )
+    )
+
+    ; Unknown action -- fail
+    (x "Invalid action type: expected 0, 1, or 2")
+
+  ))) ; Close the three nested if-expressions
+)
+
+;;; ============================================================================
+;;; DESIGN NOTES
+;;; ============================================================================
+;;;
+;;; 1. WHY PRECOMPUTE stake_lock_puzzle_hash?
+;;;    Computing a tree hash inside CLVM is extremely expensive (recursive
+;;;    SHA256 over the entire puzzle tree). The driver computes it off-chain.
+;;;    The hash is correct because the lock coin is only spendable if the
+;;;    actual puzzle matches the hash.
+;;;
+;;; 2. WHY ASSERT_MY_COIN_ID?
+;;;    Prevents replay attacks. Without it, a valid solution could be reused
+;;;    on a different pool coin. Coin IDs are unique (derived from parent +
+;;;    puzzle_hash + amount) and never repeat.
+;;;
+;;; 3. WHY BASIS POINTS FOR APY?
+;;;    CLVM only supports integers. Basis points (1 bps = 0.01%) give us
+;;;    fine-grained APY control: 5% = 500 bps, 12% = 1200 bps, etc.
+;;;
+;;; 4. WHY WITHDRAW TIMELOCK?
+;;;    Without a timelock, the operator could instantly drain all rewards
+;;;    (a "rug pull"). The 30-day delay gives stakers time to notice and
+;;;    stop staking. Existing lock coins are unaffected since they are
+;;;    independent of the pool after creation.
+;;;
+;;; 5. WHY NOT A SINGLETON?
+;;;    A production system should wrap this in a singleton for guaranteed
+;;;    uniqueness. We omit it here to focus on staking logic. See the
+;;;    README "Extending the Project" section for this idea.
+;;; ============================================================================

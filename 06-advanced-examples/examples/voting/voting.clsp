@@ -1,0 +1,201 @@
+; =============================================================================
+; SIMPLE VOTING SYSTEM PUZZLE
+; =============================================================================
+;
+; An on-chain governance system where token holders vote on proposals.
+;
+; ARCHITECTURE:
+;   The system uses TWO puzzle types that interact via announcements:
+;
+;   1. PROPOSAL PUZZLE (this file) -- The "ballot box"
+;      - Holds the proposal metadata and running tallies
+;      - Accepts votes by verifying coin announcements
+;      - Finalizes results after the voting period
+;
+;   2. VOTE COIN -- The voter's coin (standard wallet coin)
+;      - The voter spends their coin and creates a coin announcement
+;        containing their vote choice and the proposal coin ID
+;      - The proposal puzzle asserts this announcement
+;
+; HOW VOTING WORKS:
+;   1. A proposal is created with N options (e.g., ["yes", "no", "abstain"])
+;   2. During the voting period, voters spend their coins in a bundle with
+;      the proposal coin. The proposal coin asserts the vote announcements
+;      and updates its tally.
+;   3. After the voting period, anyone can finalize the proposal to
+;      announce the winning option.
+;
+; VOTE WEIGHT:
+;   Each vote is weighted by the coin amount. A coin worth 100 mojos
+;   gives 100 votes. This is a token-weighted voting system. Since
+;   splitting a coin into smaller pieces does not change the total amount,
+;   Sybil attacks via coin splitting are not effective.
+;
+; CURRIED PARAMETERS:
+;   CREATOR_PUBKEY   - Public key of the proposal creator
+;   PROPOSAL_HASH    - sha256 hash of the proposal text (for verification)
+;   NUM_OPTIONS      - Number of voting options
+;   DEADLINE_HEIGHT  - Absolute block height when voting ends
+;   TALLY            - List of vote counts per option (state)
+;   TOTAL_VOTES      - Total votes cast so far (state)
+;
+; SOLUTION:
+;   mode             - 0 = accept vote, 1 = finalize
+;   option_index     - (mode 0) Which option the voter chose (0-indexed)
+;   vote_weight      - (mode 0) Weight of this vote (coin amount)
+;   voter_coin_id    - (mode 0) ID of the voter's coin (for announcement)
+;   my_amount        - This coin's amount
+;   my_puzzle_hash   - This coin's puzzle hash (for recreation)
+;
+; =============================================================================
+
+(mod
+  (
+    ; --- Curried parameters ---
+    CREATOR_PUBKEY
+    PROPOSAL_HASH
+    NUM_OPTIONS
+    DEADLINE_HEIGHT
+    TALLY
+    TOTAL_VOTES
+
+    ; --- Solution parameters ---
+    mode
+    option_index
+    vote_weight
+    voter_coin_id
+    my_amount
+    my_puzzle_hash
+  )
+
+  (include condition_codes.clib)
+
+  ; =========================================================================
+  ; Helper: Update tally at a specific index
+  ; =========================================================================
+  ; Walk through the tally list. When we reach the target index, add the
+  ; vote weight. Return the updated tally list.
+  ;
+  ; Example: update-tally((10 20 30) 1 5) => (10 25 30)
+  ;   - Index 0: unchanged (10)
+  ;   - Index 1: 20 + 5 = 25
+  ;   - Index 2: unchanged (30)
+
+  (defun update-tally (tally index weight)
+    (if (= index 0)
+      ; This is the target index -- add the weight
+      (c (+ (f tally) weight) (r tally))
+      ; Not the target yet -- keep current value and recurse
+      (c (f tally) (update-tally (r tally) (- index 1) weight))
+    )
+  )
+
+  ; =========================================================================
+  ; Helper: Find the winning option (highest tally)
+  ; =========================================================================
+  ; Walk through the tally and track the index with the highest count.
+
+  (defun find-winner-inner (tally current_index best_index best_count)
+    (if tally
+      (if (> (f tally) best_count)
+        ; New best -- update tracking
+        (find-winner-inner (r tally) (+ current_index 1) current_index (f tally))
+        ; Current best holds -- continue
+        (find-winner-inner (r tally) (+ current_index 1) best_index best_count)
+      )
+      ; End of list -- return the best index
+      best_index
+    )
+  )
+
+  (defun find-winner (tally)
+    (find-winner-inner tally 0 0 0)
+  )
+
+  ; =========================================================================
+  ; MODE 0 -- ACCEPT VOTE
+  ; =========================================================================
+  ; Process a single vote. The voter's coin is spent in the same spend
+  ; bundle. We verify the vote via ASSERT_COIN_ANNOUNCEMENT:
+  ;
+  ;   The voter's coin creates an announcement: sha256(proposal_coin_id + option_index)
+  ;   The proposal coin asserts: ASSERT_COIN_ANNOUNCEMENT(sha256(voter_coin_id + message))
+  ;
+  ; This two-way binding ensures:
+  ;   - The voter intended to vote on THIS proposal (they include our coin ID)
+  ;   - We verify the voter actually spent their coin (we assert their announcement)
+  ;
+  ; After accepting the vote, the proposal coin recreates itself with
+  ; updated TALLY and TOTAL_VOTES. The new puzzle hash is provided by
+  ; the driver (since the curried TALLY changes).
+
+  (defun accept-vote (CREATOR_PUBKEY DEADLINE_HEIGHT TALLY TOTAL_VOTES
+                      NUM_OPTIONS option_index vote_weight voter_coin_id
+                      my_amount my_puzzle_hash)
+    ; Validate the option index is in range
+    (if (> option_index (- NUM_OPTIONS 1))
+      (x "Invalid option index")
+      (list
+        ; Enforce voting period -- must be before deadline
+        (list ASSERT_BEFORE_HEIGHT_ABSOLUTE DEADLINE_HEIGHT)
+        ; Assert the voter's coin announcement
+        ; The voter's coin announces: sha256("vote" + option_index)
+        ; We assert it came from the voter's specific coin
+        (list ASSERT_COIN_ANNOUNCEMENT
+          (sha256 voter_coin_id (sha256 "vote" option_index)))
+        ; Creator signs to process the vote
+        ; (this prevents spam votes from being included without approval)
+        (list AGG_SIG_ME CREATOR_PUBKEY (sha256 "accept_vote"))
+        ; Recreate the proposal coin with updated tally
+        ; The driver computes the new puzzle hash with updated TALLY
+        (list CREATE_COIN my_puzzle_hash my_amount)
+        ; Announce the vote was counted (for the voter's confirmation)
+        (list CREATE_COIN_ANNOUNCEMENT
+          (sha256 "vote_counted" option_index vote_weight))
+      )
+    )
+  )
+
+  ; =========================================================================
+  ; MODE 1 -- FINALIZE PROPOSAL
+  ; =========================================================================
+  ; After the voting period, finalize the proposal to announce the result.
+  ; Anyone can trigger finalization (no signature required beyond creator's).
+  ;
+  ; The result is announced via CREATE_COIN_ANNOUNCEMENT containing the
+  ; winning option index and total votes. Other systems can
+  ; ASSERT_COIN_ANNOUNCEMENT on this to conditionally execute based on
+  ; the vote result.
+
+  (defun finalize (CREATOR_PUBKEY DEADLINE_HEIGHT TALLY TOTAL_VOTES my_amount)
+    (list
+      ; Enforce that voting period has ended
+      (list ASSERT_HEIGHT_ABSOLUTE DEADLINE_HEIGHT)
+      ; Creator signs to finalize
+      (list AGG_SIG_ME CREATOR_PUBKEY (sha256 "finalize"))
+      ; Announce the result
+      ; The announcement contains the winning option index
+      (list CREATE_COIN_ANNOUNCEMENT
+        (sha256 "result" (find-winner TALLY) TOTAL_VOTES))
+      ; The coin is consumed (not recreated) -- proposal is closed
+      ; Any remaining amount can be returned to the creator
+      (list CREATE_COIN_ANNOUNCEMENT (sha256 "proposal_closed"))
+    )
+  )
+
+  ; =========================================================================
+  ; MAIN ENTRY POINT
+  ; =========================================================================
+
+  (if (= mode 0)
+    (accept-vote CREATOR_PUBKEY DEADLINE_HEIGHT TALLY TOTAL_VOTES
+                 NUM_OPTIONS option_index vote_weight voter_coin_id
+                 my_amount my_puzzle_hash)
+
+    (if (= mode 1)
+      (finalize CREATOR_PUBKEY DEADLINE_HEIGHT TALLY TOTAL_VOTES my_amount)
+
+      (x "Invalid mode")
+    )
+  )
+)

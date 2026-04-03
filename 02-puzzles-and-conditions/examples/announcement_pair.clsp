@@ -1,0 +1,501 @@
+;;; ============================================================
+;;; announcement_pair.clsp
+;;; ============================================================
+;;;
+;;; TWO PUZZLES THAT MUST BE SPENT TOGETHER (ATOMIC PAIR)
+;;;
+;;; This file contains TWO separate puzzles that form an atomic
+;;; pair using cross-coin announcements:
+;;;
+;;;   PUZZLE A -- offer_maker:
+;;;     Creates an announcement and asserts an announcement from B.
+;;;     This is the coin that "offers" value.
+;;;
+;;;   PUZZLE B -- offer_taker:
+;;;     Creates an announcement and asserts an announcement from A.
+;;;     This is the coin that "takes" the offer.
+;;;
+;;; Neither puzzle can be spent alone. If you try to spend just
+;;; Puzzle A without Puzzle B in the same spend bundle, the
+;;; ASSERT_COIN_ANNOUNCEMENT condition will fail because no coin
+;;; created the expected announcement. The same applies in
+;;; reverse. This mutual dependency creates ATOMICITY.
+;;;
+;;; === HOW ANNOUNCEMENTS WORK ===
+;;;
+;;; Announcements are ephemeral messages that exist only within
+;;; a single block's transaction processing. They are NOT stored
+;;; on the blockchain permanently.
+;;;
+;;; CREATE_COIN_ANNOUNCEMENT (opcode 60):
+;;;   A coin can broadcast a message. The announcement ID is:
+;;;     sha256(coin_id_of_announcer + message)
+;;;
+;;;   The coin_id is automatically prepended by the consensus
+;;;   layer. This means only THIS specific coin can create
+;;;   this exact announcement -- no one can forge it.
+;;;
+;;; ASSERT_COIN_ANNOUNCEMENT (opcode 61):
+;;;   A coin can require that a specific announcement exists
+;;;   in the same block. The parameter is the full announcement
+;;;   ID: sha256(expected_coin_id + expected_message).
+;;;
+;;;   If no coin in the spend bundle created that announcement,
+;;;   the assertion fails and the entire spend is rejected.
+;;;
+;;; === WHY THIS ENABLES ATOMIC SWAPS ===
+;;;
+;;; An atomic swap is: "I give you X if and only if you give me Y."
+;;; Both transfers must happen together, or neither happens.
+;;;
+;;; Without announcements, two separate coin spends in the same
+;;; bundle are independent -- a farmer could include one spend
+;;; but not the other. Announcements create a hard dependency
+;;; that the consensus layer enforces.
+;;;
+;;; Example: Alice wants to trade 100 XCH for Bob's 10 CAT tokens.
+;;;
+;;;   1. Alice creates offer_maker coin (100 XCH) that:
+;;;      - Creates announcement "alice_offers"
+;;;      - Asserts Bob's announcement "bob_accepts"
+;;;      - Sends 100 XCH to Bob's puzzle hash
+;;;
+;;;   2. Bob creates offer_taker coin (10 CAT) that:
+;;;      - Creates announcement "bob_accepts"
+;;;      - Asserts Alice's announcement "alice_offers"
+;;;      - Sends 10 CAT to Alice's puzzle hash
+;;;
+;;;   3. Both must be spent in the same spend bundle.
+;;;      If either is missing, the other's assertion fails.
+;;;
+;;; This is EXACTLY how Chia's DEX (Decentralized Exchange)
+;;; works with Offer Files. The offer file format encodes
+;;; partial spend bundles that can only be completed when both
+;;; sides are present.
+;;;
+;;; === ANNOUNCEMENT ID CALCULATION ===
+;;;
+;;; The full announcement ID includes the coin_id of the coin
+;;; that creates the announcement. This is critical for security:
+;;;
+;;;   announcement_id = sha256(announcer_coin_id + message)
+;;;
+;;; Why include coin_id?
+;;;   Without it, ANY coin could create the same message, and
+;;;   the assertion would pass. An attacker could create a
+;;;   cheap coin that broadcasts the expected message, tricking
+;;;   the asserting coin into thinking its partner is present.
+;;;
+;;;   By including coin_id in the hash, the asserting coin
+;;;   verifies that a SPECIFIC coin (identified by its unique
+;;;   coin_id) made the announcement. Since coin_ids are
+;;;   unique and unforgeable, this is secure.
+;;;
+;;; === FLOW DIAGRAM ===
+;;;
+;;;   Spend Bundle (atomic transaction)
+;;;   =====================================================
+;;;   |                                                   |
+;;;   |  OFFER MAKER (Puzzle A)    OFFER TAKER (Puzzle B) |
+;;;   |  =====================    =====================   |
+;;;   |                                                   |
+;;;   |  1. ASSERT_MY_COIN_ID     1. ASSERT_MY_COIN_ID   |
+;;;   |     (replay protection)      (replay protection)  |
+;;;   |                                                   |
+;;;   |  2. CREATE_COIN_ANN ----+                         |
+;;;   |     msg: "offer_maker"  |  2. CREATE_COIN_ANN --+ |
+;;;   |                         |     msg: "offer_taker" | |
+;;;   |                         |                        | |
+;;;   |  3. ASSERT_COIN_ANN <---+-----+                 | |
+;;;   |     expects: sha256(    |     |                  | |
+;;;   |       B_coin_id +       |     |                  | |
+;;;   |       "offer_taker")    |     |                  | |
+;;;   |                         |     |                  | |
+;;;   |                         +---->| 3. ASSERT_COIN_ANN |
+;;;   |                               |    expects: sha256(|
+;;;   |                               |      A_coin_id +   |
+;;;   |                               |      "offer_maker")|
+;;;   |                                                   |
+;;;   |  4. CREATE_COIN            4. CREATE_COIN         |
+;;;   |     (send value to B)         (send value to A)   |
+;;;   |                                                   |
+;;;   =====================================================
+;;;
+;;;   Both puzzles create what the other asserts.
+;;;   Remove either puzzle -> the other's assertion fails.
+;;;   This guarantees atomicity at the consensus level.
+;;;
+;;; ============================================================
+
+
+;;; ============================================================
+;;; PUZZLE A: OFFER MAKER
+;;; ============================================================
+;;;
+;;; This puzzle represents the coin that initiates the offer.
+;;; It holds value that will be sent to the taker when both
+;;; coins are spent together.
+;;;
+;;; Curried parameters:
+;;;   TAKER_COIN_ID - The coin_id of the offer_taker coin (Puzzle B).
+;;;                   We need to know this to assert its announcement.
+;;;                   This binds us to a SPECIFIC taker coin.
+;;;
+;;; Solution parameters:
+;;;   my_coin_id    - This coin's own ID. Used for:
+;;;                   1. ASSERT_MY_COIN_ID (replay protection)
+;;;                   2. The taker uses this to assert our announcement
+;;;   new_puzzle_hash - Where to send our value (typically the taker's
+;;;                     wallet address, but could be anything the
+;;;                     maker and taker agree on)
+;;;   my_amount     - The amount of this coin (for CREATE_COIN)
+;;;
+;;; ============================================================
+
+(mod (TAKER_COIN_ID my_coin_id new_puzzle_hash my_amount)
+
+  ;; --------------------------------------------------------
+  ;; OUTPUT CONDITIONS
+  ;;
+  ;; We return a list of conditions that, taken together,
+  ;; enforce the atomic swap:
+  ;; --------------------------------------------------------
+
+  (list
+
+    ;; --------------------------------------------------------
+    ;; CONDITION 1: ASSERT_MY_COIN_ID (opcode 70)
+    ;;
+    ;; Binds this spend to THIS specific coin. Prevents replay
+    ;; attacks where someone could reuse this solution on a
+    ;; different coin with the same puzzle hash.
+    ;;
+    ;; This is especially important in swap scenarios because
+    ;; the maker might create multiple offer coins. Each spend
+    ;; must be bound to exactly one coin.
+    ;; --------------------------------------------------------
+    (list 70 my_coin_id)
+
+    ;; --------------------------------------------------------
+    ;; CONDITION 2: ASSERT_MY_AMOUNT (opcode 73)
+    ;;
+    ;; Verifies the actual amount of the coin matches what we
+    ;; expect. This ensures we send the correct amount in the
+    ;; CREATE_COIN below. Without this, a malicious solution
+    ;; could understate the amount, causing mojos to be lost
+    ;; as fees.
+    ;; --------------------------------------------------------
+    (list 73 my_amount)
+
+    ;; --------------------------------------------------------
+    ;; CONDITION 3: CREATE_COIN_ANNOUNCEMENT (opcode 60)
+    ;;
+    ;; Broadcast the message "offer_maker" so that Puzzle B
+    ;; (the taker) can verify we are present in this spend bundle.
+    ;;
+    ;; The actual announcement ID on-chain will be:
+    ;;   sha256(my_coin_id + "offer_maker")
+    ;;
+    ;; The consensus layer automatically prepends our coin_id
+    ;; to the message when computing the announcement ID.
+    ;; This means only THIS coin can produce this specific
+    ;; announcement -- no other coin can forge it.
+    ;;
+    ;; The taker will use ASSERT_COIN_ANNOUNCEMENT with:
+    ;;   sha256(our_coin_id + "offer_maker")
+    ;; to verify this announcement exists.
+    ;; --------------------------------------------------------
+    (list 60 "offer_maker")
+
+    ;; --------------------------------------------------------
+    ;; CONDITION 4: ASSERT_COIN_ANNOUNCEMENT (opcode 61)
+    ;;
+    ;; Require that Puzzle B (the taker) has created an
+    ;; announcement with the message "offer_taker".
+    ;;
+    ;; We compute the expected announcement ID ourselves:
+    ;;   sha256(TAKER_COIN_ID + "offer_taker")
+    ;;
+    ;; Why we compute it in the puzzle:
+    ;;   The parameter to ASSERT_COIN_ANNOUNCEMENT is the FULL
+    ;;   announcement ID (the 32-byte hash), not the raw message.
+    ;;   We must hash (coin_id + message) to get the ID that
+    ;;   the consensus layer will look for.
+    ;;
+    ;; Why TAKER_COIN_ID is curried:
+    ;;   By currying in the specific coin_id of the taker, we
+    ;;   ensure that ONLY that specific taker coin can satisfy
+    ;;   this assertion. A random coin broadcasting "offer_taker"
+    ;;   would produce a different announcement ID because its
+    ;;   coin_id would be different.
+    ;;
+    ;; If the taker coin is NOT in the spend bundle:
+    ;;   No coin creates the expected announcement, the
+    ;;   assertion fails, and our spend is rejected. Our coin
+    ;;   remains safely unspent. This is the atomicity guarantee.
+    ;; --------------------------------------------------------
+    (list 61 (sha256 TAKER_COIN_ID "offer_taker"))
+
+    ;; --------------------------------------------------------
+    ;; CONDITION 5: CREATE_COIN (opcode 51)
+    ;;
+    ;; Send our full amount to the new_puzzle_hash. In a swap
+    ;; scenario, this would be the taker's wallet puzzle hash,
+    ;; sending our value to them as our side of the trade.
+    ;;
+    ;; The full amount is forwarded (no fee deducted here).
+    ;; If a fee is needed, it can be provided by a separate
+    ;; coin in the spend bundle.
+    ;; --------------------------------------------------------
+    (list 51 new_puzzle_hash my_amount)
+  )
+)
+
+
+;;; ============================================================
+;;; PUZZLE B: OFFER TAKER
+;;; ============================================================
+;;;
+;;; This puzzle represents the coin that accepts the offer.
+;;; It holds value that will be sent to the maker when both
+;;; coins are spent together. It also requires a signature
+;;; from the taker (the person accepting the offer) to prevent
+;;; unauthorized acceptance.
+;;;
+;;; Curried parameters:
+;;;   MAKER_COIN_ID - The coin_id of the offer_maker coin (Puzzle A).
+;;;                   We need this to assert its announcement.
+;;;   PUBLIC_KEY    - BLS public key of the taker. Only the taker
+;;;                   can decide to accept the offer by signing.
+;;;
+;;; Solution parameters:
+;;;   my_coin_id    - This coin's own ID (for assertions and
+;;;                   announcement creation)
+;;;   new_puzzle_hash - Where to send our value (typically the
+;;;                     maker's wallet address)
+;;;   my_amount     - The amount of this coin
+;;;
+;;; Why does Puzzle B have a signature but Puzzle A does not?
+;;;   Puzzle A (the maker) is typically an "offer coin" created
+;;;   specifically for the swap. The maker already authorized
+;;;   the swap by creating the coin with the taker's coin_id
+;;;   curried in. No further authorization is needed.
+;;;
+;;;   Puzzle B (the taker) needs a signature because the taker
+;;;   must actively choose to accept. Without it, anyone who
+;;;   knows the maker's coin_id could spend the taker's coin.
+;;;
+;;;   In practice, both sides often use signatures. This example
+;;;   shows the asymmetric pattern for clarity.
+;;;
+;;; NOTE: This puzzle is commented out because a .clsp file can
+;;; only have ONE top-level (mod ...) form. To use Puzzle B,
+;;; copy it to a separate file, or comment out Puzzle A and
+;;; uncomment this one.
+;;; ============================================================
+
+; (mod (MAKER_COIN_ID PUBLIC_KEY my_coin_id new_puzzle_hash my_amount)
+;
+;   ;; --------------------------------------------------------
+;   ;; sha256tree: needed for AGG_SIG_ME message computation.
+;   ;; We hash a "signing message" that commits to all the
+;   ;; important values in this spend.
+;   ;; --------------------------------------------------------
+;   (defun sha256tree (TREE)
+;     (if (l TREE)
+;       (sha256 2 (sha256tree (f TREE)) (sha256tree (r TREE)))
+;       (sha256 1 TREE)
+;     )
+;   )
+;
+;   (list
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 1: ASSERT_MY_COIN_ID (opcode 70)
+;     ;;
+;     ;; Same as Puzzle A: bind this spend to this specific coin.
+;     ;; --------------------------------------------------------
+;     (list 70 my_coin_id)
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 2: ASSERT_MY_AMOUNT (opcode 73)
+;     ;;
+;     ;; Verify the coin amount to prevent value manipulation.
+;     ;; --------------------------------------------------------
+;     (list 73 my_amount)
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 3: AGG_SIG_ME (opcode 50)
+;     ;;
+;     ;; Require the taker to sign this spend. The signed message
+;     ;; is the sha256tree of a list containing the key values:
+;     ;;   (new_puzzle_hash my_amount MAKER_COIN_ID)
+;     ;;
+;     ;; This ensures the taker explicitly approves:
+;     ;;   - Where the funds go (new_puzzle_hash)
+;     ;;   - How much is being sent (my_amount)
+;     ;;   - Which maker coin this is paired with (MAKER_COIN_ID)
+;     ;;
+;     ;; Without this signature, anyone who knows the maker's
+;     ;; coin_id could force the taker's coin to be spent.
+;     ;; --------------------------------------------------------
+;     (list 50 PUBLIC_KEY
+;       (sha256tree (list new_puzzle_hash my_amount MAKER_COIN_ID))
+;     )
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 4: CREATE_COIN_ANNOUNCEMENT (opcode 60)
+;     ;;
+;     ;; Broadcast "offer_taker" so Puzzle A can verify we exist.
+;     ;;
+;     ;; Announcement ID on-chain:
+;     ;;   sha256(my_coin_id + "offer_taker")
+;     ;;
+;     ;; Puzzle A asserts this exact ID using:
+;     ;;   (61 (sha256 TAKER_COIN_ID "offer_taker"))
+;     ;; where TAKER_COIN_ID = our my_coin_id.
+;     ;; --------------------------------------------------------
+;     (list 60 "offer_taker")
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 5: ASSERT_COIN_ANNOUNCEMENT (opcode 61)
+;     ;;
+;     ;; Require that Puzzle A has broadcast "offer_maker".
+;     ;;
+;     ;; Expected announcement ID:
+;     ;;   sha256(MAKER_COIN_ID + "offer_maker")
+;     ;;
+;     ;; This creates the bidirectional dependency:
+;     ;;   A asserts B's announcement (A needs B)
+;     ;;   B asserts A's announcement (B needs A)
+;     ;; Neither can be spent without the other.
+;     ;; --------------------------------------------------------
+;     (list 61 (sha256 MAKER_COIN_ID "offer_maker"))
+;
+;     ;; --------------------------------------------------------
+;     ;; CONDITION 6: CREATE_COIN (opcode 51)
+;     ;;
+;     ;; Send our value to the agreed destination. In a swap,
+;     ;; this is typically the maker's wallet puzzle hash.
+;     ;; --------------------------------------------------------
+;     (list 51 new_puzzle_hash my_amount)
+;   )
+; )
+
+
+;;; ============================================================
+;;; HOW TO USE THESE PUZZLES TOGETHER
+;;; ============================================================
+;;;
+;;; Step 1: PREPARATION
+;;;   Both parties need to know each other's coin IDs before
+;;;   creating the puzzle. This creates a chicken-and-egg
+;;;   problem: to compute a coin_id, you need the puzzle_hash,
+;;;   but the puzzle requires the other coin's ID.
+;;;
+;;;   In practice, this is solved by:
+;;;   a) One party creates their coin first with a placeholder,
+;;;      then the other party creates their coin referencing
+;;;      the first, and the first coin is recreated; OR
+;;;   b) Both parties use a shared protocol to pre-compute
+;;;      coin IDs from agreed-upon parameters; OR
+;;;   c) Using the Offer File format, which handles this
+;;;      complexity automatically.
+;;;
+;;; Step 2: CREATE THE COINS
+;;;   - Maker creates Puzzle A coin:
+;;;       Curry in: TAKER_COIN_ID
+;;;       Amount: whatever the maker is offering
+;;;
+;;;   - Taker creates Puzzle B coin:
+;;;       Curry in: MAKER_COIN_ID, PUBLIC_KEY
+;;;       Amount: whatever the taker is offering
+;;;
+;;; Step 3: BUILD THE SPEND BUNDLE
+;;;   A SpendBundle contains BOTH coin spends:
+;;;
+;;;   SpendBundle(
+;;;     coin_spends = [
+;;;       CoinSpend(
+;;;         coin = maker_coin,
+;;;         puzzle_reveal = puzzle_A,
+;;;         solution = (maker_coin_id, taker_wallet_ph, maker_amount)
+;;;       ),
+;;;       CoinSpend(
+;;;         coin = taker_coin,
+;;;         puzzle_reveal = puzzle_B,
+;;;         solution = (taker_coin_id, maker_wallet_ph, taker_amount)
+;;;       )
+;;;     ],
+;;;     aggregated_signature = taker_signature  ; only taker signs
+;;;   )
+;;;
+;;; Step 4: SUBMIT
+;;;   Submit the spend bundle to the mempool. The blockchain
+;;;   validates ALL conditions from BOTH spends:
+;;;
+;;;   From Puzzle A:
+;;;     ASSERT_MY_COIN_ID(maker_coin_id)          -> PASS
+;;;     ASSERT_MY_AMOUNT(maker_amount)             -> PASS
+;;;     CREATE_COIN_ANNOUNCEMENT("offer_maker")    -> Created
+;;;     ASSERT_COIN_ANNOUNCEMENT(sha256(taker_id   -> PASS (B created it)
+;;;       + "offer_taker"))
+;;;     CREATE_COIN(taker_wallet, maker_amount)    -> Created
+;;;
+;;;   From Puzzle B:
+;;;     ASSERT_MY_COIN_ID(taker_coin_id)           -> PASS
+;;;     ASSERT_MY_AMOUNT(taker_amount)             -> PASS
+;;;     AGG_SIG_ME(public_key, message)            -> PASS (sig valid)
+;;;     CREATE_COIN_ANNOUNCEMENT("offer_taker")    -> Created
+;;;     ASSERT_COIN_ANNOUNCEMENT(sha256(maker_id   -> PASS (A created it)
+;;;       + "offer_maker"))
+;;;     CREATE_COIN(maker_wallet, taker_amount)    -> Created
+;;;
+;;;   ALL conditions pass -> both spends succeed atomically.
+;;;   The maker receives the taker's value, and vice versa.
+;;;
+;;; === WHAT IF SOMEONE TRIES TO CHEAT? ===
+;;;
+;;; Scenario 1: Taker tries to spend Puzzle B alone
+;;;   -> ASSERT_COIN_ANNOUNCEMENT fails (no Puzzle A announcement)
+;;;   -> Spend rejected. Taker's coin is safe.
+;;;
+;;; Scenario 2: Maker tries to spend Puzzle A alone
+;;;   -> ASSERT_COIN_ANNOUNCEMENT fails (no Puzzle B announcement)
+;;;   -> Spend rejected. Maker's coin is safe.
+;;;
+;;; Scenario 3: Attacker substitutes a fake Puzzle B
+;;;   -> Fake coin has a different coin_id
+;;;   -> Puzzle A asserts sha256(TAKER_COIN_ID + "offer_taker")
+;;;   -> Fake coin's announcement has sha256(fake_id + "offer_taker")
+;;;   -> These hashes do not match -> assertion fails
+;;;   -> Spend rejected.
+;;;
+;;; Scenario 4: Farmer tries to include only one spend
+;;;   -> The included spend's assertion fails
+;;;   -> Farmer cannot selectively execute one side of the swap
+;;;
+;;; ============================================================
+;;;
+;;; CONNECTION TO CHIA OFFERS
+;;; ============================================================
+;;;
+;;; Chia's Offer File system (.offer files) uses this exact
+;;; announcement pattern at its core. When you create an offer
+;;; in the Chia wallet:
+;;;
+;;; 1. The wallet creates a partial spend bundle with your
+;;;    coin spends and the announcements you create.
+;;;
+;;; 2. The offer file is shared (via file, URL, or dexie.space).
+;;;
+;;; 3. The counterparty's wallet completes the spend bundle
+;;;    by adding their coin spends with matching announcements.
+;;;
+;;; 4. The completed bundle is submitted to the blockchain.
+;;;
+;;; The announcement pattern ensures that partial offers are
+;;; safe to share publicly -- they cannot be exploited because
+;;; they are incomplete without the matching counterpart.
+;;;
+;;; ============================================================
