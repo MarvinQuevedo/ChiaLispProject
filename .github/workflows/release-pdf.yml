@@ -1,0 +1,95 @@
+name: Build PDF and Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-pdf:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pandoc and LaTeX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc texlive-xetex texlive-fonts-recommended texlive-fonts-extra lmodern
+
+      - name: Merge all chapters into a single markdown
+        run: |
+          cat > combined.md << 'HEADER'
+          ---
+          title: "ChiaLisp Complete Learning Guide"
+          subtitle: "From Zero to CAT Staking"
+          author: "MarvinQuevedo"
+          date: "$(date +%Y-%m-%d)"
+          titlepage: true
+          toc: true
+          toc-depth: 3
+          geometry: margin=2.5cm
+          fontsize: 11pt
+          documentclass: report
+          highlight-style: tango
+          header-includes:
+            - \usepackage{fvextra}
+            - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+            - \usepackage{hyperref}
+            - \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+          ---
+
+          HEADER
+
+          # Append README (skip the H1 title since we have a title page)
+          tail -n +2 README.md >> combined.md
+          echo -e "\n\n\\\\newpage\n" >> combined.md
+
+          # Append each chapter in order
+          for dir in 01-fundamentals 02-puzzles-and-conditions 03-currying-and-inner-puzzles 04-python-drivers 05-cats 06-advanced-examples 07-staking-project; do
+            if [ -f "$dir/README.md" ]; then
+              cat "$dir/README.md" >> combined.md
+              echo -e "\n\n\\\\newpage\n" >> combined.md
+            fi
+          done
+
+      - name: Build PDF with pandoc
+        run: |
+          pandoc combined.md \
+            -o ChiaLisp-Learning-Guide.pdf \
+            --pdf-engine=xelatex \
+            --toc \
+            --toc-depth=3 \
+            -V geometry:margin=2.5cm \
+            -V fontsize=11pt \
+            -V documentclass=report \
+            -V colorlinks=true \
+            -V linkcolor=blue \
+            -V urlcolor=blue \
+            -V toccolor=blue \
+            --highlight-style=tango \
+            -V header-includes='\usepackage{fvextra}\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ChiaLisp-Learning-Guide.pdf
+          name: "ChiaLisp Learning Guide ${{ github.ref_name }}"
+          body: |
+            ## ChiaLisp Complete Learning Guide
+
+            PDF version of the complete learning guide, from fundamentals to the CAT Staking final project.
+
+            ### Chapters included
+            1. Fundamentals
+            2. Puzzles & Conditions
+            3. Currying & Inner Puzzles
+            4. Python Drivers
+            5. CATs (Chia Asset Tokens)
+            6. Advanced Examples
+            7. Final Project: CAT Staking
+          generate_release_notes: true
