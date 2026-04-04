@@ -48,7 +48,7 @@ jobs:
           printf '%s\n' \
             '---' \
             'title: "ChiaLisp Complete Learning Guide"' \
-            'subtitle: "From Zero to CAT Staking"' \
+            'subtitle: "From Zero to Advanced Projects"' \
             'author: "Marvin Quevedo"' \
             "date: \"${DATE}\"" \
             'titlepage: true' \
@@ -60,6 +60,9 @@ jobs:
             'header-includes:' \
             '  - \usepackage{hyperref}' \
             '  - \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}' \
+            '  - \usepackage{fvextra}' \
+            '  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}' \
+            '  - \renewenvironment{Shaded}{\begin{snugshade}\footnotesize}{\end{snugshade}}' \
             '---' \
             '' > combined.md
 
@@ -70,7 +73,7 @@ jobs:
             '' \
             '\begin{center}' \
             '{\Large\textbf{ChiaLisp Complete Learning Guide}}\\[0.5cm]' \
-            '{\large From Zero to CAT Staking}\\[2cm]' \
+            '{\large From Zero to Advanced Projects}\\[2cm]' \
             '' \
             '{\large Author: \textbf{Marvin Quevedo}}\\[0.3cm]' \
             '{\normalsize \url{https://github.com/MarvinQuevedo}}\\[2cm]' \
@@ -129,7 +132,7 @@ jobs:
             --pdf-engine=xelatex \
             --toc \
             --toc-depth=3 \
-            --listings \
+            --highlight-style=tango \
             -V geometry:margin=2.5cm \
             -V fontsize=11pt \
             -V documentclass=report \
