@@ -21,41 +21,109 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pandoc texlive-xetex texlive-fonts-recommended texlive-fonts-extra lmodern
 
-      - name: Merge all chapters into a single markdown
+      - name: Build combined markdown
+        shell: bash
         run: |
-          cat > combined.md << 'HEADER'
-          ---
-          title: "ChiaLisp Complete Learning Guide"
-          subtitle: "From Zero to CAT Staking"
-          author: "MarvinQuevedo"
-          date: "$(date +%Y-%m-%d)"
-          titlepage: true
-          toc: true
-          toc-depth: 3
-          geometry: margin=2.5cm
-          fontsize: 11pt
-          documentclass: report
-          highlight-style: tango
-          header-includes:
-            - \usepackage{fvextra}
-            - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
-            - \usepackage{hyperref}
-            - \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
-          ---
+          DATE=$(date +%Y-%m-%d)
 
-          HEADER
+          # --- Helper: append all code files from a directory ---
+          append_code_files() {
+            local search_dir="$1"
+            local chapter_label="$2"
+            [ -d "$search_dir" ] || return
+            printf '\n\n## Source Code: %s\n' "$chapter_label" >> combined.md
+            find "$search_dir" -type f \( -name '*.clsp' -o -name '*.py' \) | sort | while read -r file; do
+              case "$file" in
+                *.clsp) lang="lisp" ;;
+                *.py)   lang="python" ;;
+                *)      lang="" ;;
+              esac
+              printf '\n### `%s`\n\n```%s\n' "$file" "$lang" >> combined.md
+              cat "$file" >> combined.md
+              printf '\n```\n' >> combined.md
+            done
+          }
 
-          # Append README (skip the H1 title since we have a title page)
+          # --- Frontmatter (no indentation) ---
+          printf '%s\n' \
+            '---' \
+            'title: "ChiaLisp Complete Learning Guide"' \
+            'subtitle: "From Zero to CAT Staking"' \
+            'author: "Marvin Quevedo"' \
+            "date: \"${DATE}\"" \
+            'titlepage: true' \
+            'toc: true' \
+            'toc-depth: 3' \
+            'geometry: margin=2.5cm' \
+            'fontsize: 11pt' \
+            'documentclass: report' \
+            'highlight-style: tango' \
+            'header-includes:' \
+            '  - \usepackage{fvextra}' \
+            '  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}' \
+            '  - \usepackage{hyperref}' \
+            '  - \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}' \
+            '---' \
+            '' > combined.md
+
+          # --- License and author page (raw LaTeX) ---
+          printf '%s\n' \
+            '\thispagestyle{empty}' \
+            '\vspace*{\fill}' \
+            '' \
+            '\begin{center}' \
+            '{\Large\textbf{ChiaLisp Complete Learning Guide}}\\[0.5cm]' \
+            '{\large From Zero to CAT Staking}\\[2cm]' \
+            '' \
+            '{\large Author: \textbf{Marvin Quevedo}}\\[0.3cm]' \
+            '{\normalsize \url{https://github.com/MarvinQuevedo}}\\[2cm]' \
+            '' \
+            '{\small This work is licensed under a}\\[0.2cm]' \
+            '{\normalsize \textbf{Creative Commons Attribution-ShareAlike 4.0 International License}}\\[0.2cm]' \
+            '{\small (CC BY-SA 4.0)}\\[0.5cm]' \
+            '{\small \url{https://creativecommons.org/licenses/by-sa/4.0/}}\\[2cm]' \
+            '' \
+            '{\footnotesize You are free to share and adapt this material for any purpose, even commercially,}\\' \
+            '{\footnotesize as long as you give appropriate credit and distribute your contributions}\\' \
+            '{\footnotesize under the same license.}\\[1cm]' \
+            '' \
+            '{\footnotesize Source code: \url{https://github.com/MarvinQuevedo/ChiaLispProject}}' \
+            '' \
+            '\end{center}' \
+            '' \
+            '\vspace*{\fill}' \
+            '\newpage' \
+            '' >> combined.md
+
+          # --- README (introduction) - skip H1 title ---
           tail -n +2 README.md >> combined.md
-          echo -e "\n\n\\\\newpage\n" >> combined.md
+          printf '\n\n\\newpage\n\n' >> combined.md
 
-          # Append each chapter in order
-          for dir in 01-fundamentals 02-puzzles-and-conditions 03-currying-and-inner-puzzles 04-python-drivers 05-cats 06-advanced-examples 07-staking-project; do
-            if [ -f "$dir/README.md" ]; then
-              cat "$dir/README.md" >> combined.md
-              echo -e "\n\n\\\\newpage\n" >> combined.md
-            fi
+          # --- Chapters: README content + code files ---
+          chapters=(
+            "01-fundamentals|examples|Chapter 1 - Fundamentals"
+            "02-puzzles-and-conditions|examples|Chapter 2 - Puzzles & Conditions"
+            "03-currying-and-inner-puzzles|examples|Chapter 3 - Currying & Inner Puzzles"
+            "04-python-drivers|examples|Chapter 4 - Python Drivers"
+            "05-cats|examples|Chapter 5 - CATs"
+            "06-advanced-examples|examples|Chapter 6 - Advanced Examples"
+          )
+
+          for entry in "${chapters[@]}"; do
+            IFS='|' read -r dir codedir label <<< "$entry"
+            cat "$dir/README.md" >> combined.md
+            append_code_files "$dir/$codedir" "$label"
+            printf '\n\n\\newpage\n\n' >> combined.md
           done
+
+          # Chapter 7 (multiple code directories)
+          cat 07-staking-project/README.md >> combined.md
+          append_code_files "07-staking-project/puzzles" "Chapter 7 - Staking Puzzles"
+          append_code_files "07-staking-project/drivers" "Chapter 7 - Staking Drivers"
+          append_code_files "07-staking-project/tests" "Chapter 7 - Staking Tests"
+          printf '\n\n\\newpage\n\n' >> combined.md
+
+          echo "combined.md built successfully ($(wc -l < combined.md) lines)"
 
       - name: Build PDF with pandoc
         run: |
@@ -82,14 +150,19 @@ jobs:
           body: |
             ## ChiaLisp Complete Learning Guide
 
-            PDF version of the complete learning guide, from fundamentals to the CAT Staking final project.
+            PDF version of the complete learning guide, including all chapter content and source code.
 
-            ### Chapters included
-            1. Fundamentals
-            2. Puzzles & Conditions
-            3. Currying & Inner Puzzles
-            4. Python Drivers
-            5. CATs (Chia Asset Tokens)
-            6. Advanced Examples
-            7. Final Project: CAT Staking
+            **Author:** Marvin Quevedo
+            **License:** [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+
+            ### Contents
+            - Introduction & Environment Setup
+            - Chapter 1: Fundamentals (5 examples)
+            - Chapter 2: Puzzles & Conditions (6 examples)
+            - Chapter 3: Currying & Inner Puzzles (5 examples)
+            - Chapter 4: Python Drivers (4 examples)
+            - Chapter 5: CATs - Chia Asset Tokens (4 examples)
+            - Chapter 6: Advanced Examples (10 examples)
+            - Chapter 7: Final Project - CAT Staking (4 files)
+            - **34 source code files** included in full
           generate_release_notes: true

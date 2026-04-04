@@ -2,7 +2,7 @@
 
 > **⚠️ Disclaimer:** This project is provided for educational purposes only. We do not guarantee that any programs or code examples will function correctly in all environments or scenarios. Use at your own risk. We are not responsible for any loss of funds, data, or other damages that may result from using this code.
 
-A comprehensive, hands-on guide to learning ChiaLisp — the smart coin programming language of the Chia blockchain. This guide takes you from zero to building a fully functional CAT Staking system.
+A comprehensive, hands-on guide to learning ChiaLisp — the smart coin programming language of the Chia blockchain. This guide takes you from zero to building a hypothetical CAT Staking system.
 
 ## Who Is This For?
 
