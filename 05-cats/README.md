@@ -273,7 +273,7 @@ The simplest and most common TAIL. Allows minting exactly once, tied to a specif
 
 **Use case:** Fixed-supply tokens. You decide the total supply at creation time.
 
-See: [examples/simple_tail.clsp](examples/simple_tail.clsp)
+See: [examples/simple_tail.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/simple_tail.clsp)
 
 #### 2. Everything with Signature (Authorized Minter)
 
@@ -286,7 +286,7 @@ Allows ongoing minting, controlled by a public key.
 
 **Use case:** Tokens where you want to mint more over time (stablecoins, reward tokens).
 
-See: [examples/authorized_minter_tail.clsp](examples/authorized_minter_tail.clsp)
+See: [examples/authorized_minter_tail.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/authorized_minter_tail.clsp)
 
 #### 3. Delegated TAIL
 
@@ -705,10 +705,10 @@ chia/wallet/puzzles/
 
 See the `examples/` directory:
 
-- [`simple_tail.clsp`](examples/simple_tail.clsp) - A single-issuance TAIL program
-- [`authorized_minter_tail.clsp`](examples/authorized_minter_tail.clsp) - A TAIL for authorized minting
-- [`cat_with_custom_inner.clsp`](examples/cat_with_custom_inner.clsp) - A CAT with a custom inner puzzle
-- [`cat_driver.py`](examples/cat_driver.py) - Python driver for CAT operations
+- [`simple_tail.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/simple_tail.clsp) - A single-issuance TAIL program
+- [`authorized_minter_tail.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/authorized_minter_tail.clsp) - A TAIL for authorized minting
+- [`cat_with_custom_inner.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/cat_with_custom_inner.clsp) - A CAT with a custom inner puzzle
+- [`cat_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/05-cats/examples/cat_driver.py) - Python driver for CAT operations
 
 ---
 

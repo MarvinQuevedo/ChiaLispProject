@@ -869,11 +869,11 @@ puzzle_hash = curried.get_tree_hash()
 
 | File | Description |
 |------|-------------|
-| [`examples/simple_curry.clsp`](examples/simple_curry.clsp) | Basic greeting puzzle demonstrating currying |
-| [`examples/rate_limited_wallet.clsp`](examples/rate_limited_wallet.clsp) | Outer puzzle enforcing a spending limit |
-| [`examples/multi_sig.clsp`](examples/multi_sig.clsp) | 2-of-3 multisig puzzle |
-| [`examples/delegated_puzzle.clsp`](examples/delegated_puzzle.clsp) | Simplified delegated spending (like standard tx) |
-| [`examples/timelocked_wrapper.clsp`](examples/timelocked_wrapper.clsp) | Generic timelock wrapper for any inner puzzle |
+| [`examples/simple_curry.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/03-currying-and-inner-puzzles/examples/simple_curry.clsp) | Basic greeting puzzle demonstrating currying |
+| [`examples/rate_limited_wallet.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/03-currying-and-inner-puzzles/examples/rate_limited_wallet.clsp) | Outer puzzle enforcing a spending limit |
+| [`examples/multi_sig.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/03-currying-and-inner-puzzles/examples/multi_sig.clsp) | 2-of-3 multisig puzzle |
+| [`examples/delegated_puzzle.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/03-currying-and-inner-puzzles/examples/delegated_puzzle.clsp) | Simplified delegated spending (like standard tx) |
+| [`examples/timelocked_wrapper.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/03-currying-and-inner-puzzles/examples/timelocked_wrapper.clsp) | Generic timelock wrapper for any inner puzzle |
 
 ---
 

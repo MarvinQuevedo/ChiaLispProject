@@ -1199,10 +1199,10 @@ class MyPuzzleDriver:
 
 See the `examples/` directory for complete, runnable driver scripts:
 
-- [`compile_and_run.py`](examples/compile_and_run.py) - Compile a puzzle and run it locally
-- [`create_coin_driver.py`](examples/create_coin_driver.py) - Full driver for creating and spending a coin
-- [`signature_driver.py`](examples/signature_driver.py) - Driver with BLS signature handling
-- [`watch_coin.py`](examples/watch_coin.py) - Utility to watch a coin's lifecycle
+- [`compile_and_run.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/04-python-drivers/examples/compile_and_run.py) - Compile a puzzle and run it locally
+- [`create_coin_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/04-python-drivers/examples/create_coin_driver.py) - Full driver for creating and spending a coin
+- [`signature_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/04-python-drivers/examples/signature_driver.py) - Driver with BLS signature handling
+- [`watch_coin.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/04-python-drivers/examples/watch_coin.py) - Utility to watch a coin's lifecycle
 
 ---
 

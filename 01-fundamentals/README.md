@@ -491,11 +491,11 @@ See the [examples/](examples/) directory:
 
 | File | Concept |
 |------|---------|
-| [hello_world.clsp](examples/hello_world.clsp) | Basic program structure |
-| [basic_math.clsp](examples/basic_math.clsp) | Arithmetic operations |
-| [list_operations.clsp](examples/list_operations.clsp) | List manipulation and recursion |
-| [fibonacci.clsp](examples/fibonacci.clsp) | Recursive computation |
-| [factorial.clsp](examples/factorial.clsp) | Tail-call optimization |
+| [hello_world.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/01-fundamentals/examples/hello_world.clsp) | Basic program structure |
+| [basic_math.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/01-fundamentals/examples/basic_math.clsp) | Arithmetic operations |
+| [list_operations.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/01-fundamentals/examples/list_operations.clsp) | List manipulation and recursion |
+| [fibonacci.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/01-fundamentals/examples/fibonacci.clsp) | Recursive computation |
+| [factorial.clsp](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/01-fundamentals/examples/factorial.clsp) | Tail-call optimization |
 
 ### Running the Examples
 

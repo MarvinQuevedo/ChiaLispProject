@@ -22,7 +22,7 @@ In this chapter we move beyond toy examples and build **five practical systems**
 
 ## 1. Escrow System
 
-**Files**: `examples/escrow/escrow.clsp` | `examples/escrow/escrow_driver.py`
+**Files**: [`examples/escrow/escrow.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/escrow/escrow.clsp) | [`examples/escrow/escrow_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/escrow/escrow_driver.py)
 
 ### Concept and Real-World Use Case
 
@@ -78,7 +78,7 @@ The driver assembles the correct `CoinSpend` and pairs it with the appropriate a
 
 ## 2. Savings Account
 
-**Files**: `examples/savings/savings_account.clsp` | `examples/savings/savings_driver.py`
+**Files**: [`examples/savings/savings_account.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/savings/savings_account.clsp) | [`examples/savings/savings_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/savings/savings_driver.py)
 
 ### Concept and Real-World Use Case
 
@@ -127,7 +127,7 @@ The driver tracks the singleton-like coin, computes allowed withdrawal amounts, 
 
 ## 3. Lottery / Raffle
 
-**Files**: `examples/lottery/lottery.clsp` | `examples/lottery/lottery_driver.py`
+**Files**: [`examples/lottery/lottery.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/lottery/lottery.clsp) | [`examples/lottery/lottery_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/lottery/lottery_driver.py)
 
 ### Concept and Real-World Use Case
 
@@ -178,7 +178,7 @@ The driver handles ticket purchases (spending and recreating the lottery coin), 
 
 ## 4. Token Vesting
 
-**Files**: `examples/vesting/vesting.clsp` | `examples/vesting/vesting_driver.py`
+**Files**: [`examples/vesting/vesting.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/vesting/vesting.clsp) | [`examples/vesting/vesting_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/vesting/vesting_driver.py)
 
 ### Concept and Real-World Use Case
 
@@ -229,7 +229,7 @@ The driver calculates the current vested amount based on block height, determine
 
 ## 5. Simple Voting System
 
-**Files**: `examples/voting/voting.clsp` | `examples/voting/voting_driver.py`
+**Files**: [`examples/voting/voting.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/voting/voting.clsp) | [`examples/voting/voting_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/06-advanced-examples/examples/voting/voting_driver.py)
 
 ### Concept and Real-World Use Case
 

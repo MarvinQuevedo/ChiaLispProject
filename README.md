@@ -61,15 +61,15 @@ pip install clvm_tools_rs
 
 ## Learning Path
 
-| Chapter | Topic | What You'll Learn |
-|---------|-------|-------------------|
-| [01](01-fundamentals/README.md) | **Fundamentals** | CLVM basics, data types, operators, ChiaLisp syntax |
-| [02](02-puzzles-and-conditions/README.md) | **Puzzles & Conditions** | The coin model, puzzles, conditions, security |
-| [03](03-currying-and-inner-puzzles/README.md) | **Currying & Inner Puzzles** | Partial application, composition, standard transactions |
-| [04](04-python-drivers/README.md) | **Python Drivers** | Connecting puzzles to the blockchain with Python |
-| [05](05-cats/README.md) | **CATs (Chia Asset Tokens)** | Fungible tokens, TAILs, CAT mechanics |
-| [06](06-advanced-examples/README.md) | **Advanced Examples** | Escrow, Savings, Lottery, Vesting, Voting |
-| [07](07-staking-project/README.md) | **Final Project: CAT Staking** | Complete staking system with pool + lock mechanics |
+| Chapter | What You'll Learn |
+|---------|-------------------|
+| [01 - **Fundamentals**](01-fundamentals/README.md) | CLVM basics, data types, operators, ChiaLisp syntax |
+| [02 - **Puzzles & Conditions**](02-puzzles-and-conditions/README.md) | The coin model, puzzles, conditions, security |
+| [03 - **Currying & Inner Puzzles**](03-currying-and-inner-puzzles/README.md) | Partial application, composition, standard transactions |
+| [04 - **Python Drivers**](04-python-drivers/README.md) | Connecting puzzles to the blockchain with Python |
+| [05 - **CATs (Chia Asset Tokens)**](05-cats/README.md) | Fungible tokens, TAILs, CAT mechanics |
+| [06 - **Advanced Examples**](06-advanced-examples/README.md) | Escrow, Savings, Lottery, Vesting, Voting |
+| [07 - **Final Project: CAT Staking**](07-staking-project/README.md) | Complete staking system with pool + lock mechanics |
 
 ---
 

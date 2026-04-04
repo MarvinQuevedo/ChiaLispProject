@@ -211,7 +211,7 @@ All values in CAT mojos. Integer division truncates remainders, so the pool neve
 
 ## Puzzle Design: Staking Pool
 
-**File**: `puzzles/staking_pool.clsp`
+**File**: [`puzzles/staking_pool.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/07-staking-project/puzzles/staking_pool.clsp)
 
 ### Curried Parameters
 
@@ -267,7 +267,7 @@ The puzzle:
 
 ## Puzzle Design: Stake Lock
 
-**File**: `puzzles/stake_lock.clsp`
+**File**: [`puzzles/stake_lock.clsp`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/07-staking-project/puzzles/stake_lock.clsp)
 
 ### Curried Parameters
 
@@ -398,7 +398,7 @@ The staker receives their original tokens plus the reward. The stake lock coin i
 
 ## Driver Design
 
-**File**: `drivers/staking_driver.py`
+**File**: [`drivers/staking_driver.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/07-staking-project/drivers/staking_driver.py)
 
 ### StakingPoolDriver
 
@@ -465,7 +465,7 @@ CLVM uses arbitrary-precision integers (no overflow). Reward calculations use in
 
 ## Testing Strategy
 
-**File**: `tests/test_staking.py`
+**File**: [`tests/test_staking.py`](https://github.com/MarvinQuevedo/ChiaLispProject/blob/main/07-staking-project/tests/test_staking.py)
 
 ### Test Cases
 
