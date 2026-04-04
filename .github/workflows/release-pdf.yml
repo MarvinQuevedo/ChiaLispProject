@@ -57,10 +57,7 @@ jobs:
             'geometry: margin=2.5cm' \
             'fontsize: 11pt' \
             'documentclass: report' \
-            'highlight-style: tango' \
             'header-includes:' \
-            '  - \usepackage{fvextra}' \
-            '  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}' \
             '  - \usepackage{hyperref}' \
             '  - \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}' \
             '---' \
@@ -132,15 +129,14 @@ jobs:
             --pdf-engine=xelatex \
             --toc \
             --toc-depth=3 \
+            --listings \
             -V geometry:margin=2.5cm \
             -V fontsize=11pt \
             -V documentclass=report \
             -V colorlinks=true \
             -V linkcolor=blue \
             -V urlcolor=blue \
-            -V toccolor=blue \
-            --highlight-style=tango \
-            -V header-includes='\usepackage{fvextra}\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}'
+            -V toccolor=blue
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
